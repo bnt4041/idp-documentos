@@ -1,0 +1,61 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: idp_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-idp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-idp}
+      POSTGRES_DB: ${POSTGRES_DB:-idp}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-idp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: idp_ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+
+  backend:
+    build: ./backend
+    container_name: idp_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-idp}:${POSTGRES_PASSWORD:-idp}@db:5432/${POSTGRES_DB:-idp}
+      OCR_LANGS: ${OCR_LANGS:-spa+eng}
+      STORAGE_DIR: /data/uploads
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      OLLAMA_VISION: ${OLLAMA_VISION:-false}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+    volumes:
+      - uploads:/data/uploads
+    ports:
+      - "8088:8000"
+
+  frontend:
+    build: ./frontend
+    container_name: idp_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8090:80"
+
+volumes:
+  db_data:
+  uploads:
+  ollama_models:
