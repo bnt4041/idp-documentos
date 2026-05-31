@@ -62,6 +62,25 @@ class FieldOut(FieldIn):
     id: int
 
 
+# ---- Template anchors (hitos / puntos fijos) ----
+class AnchorIn(BaseModel):
+    name: str = ""
+    x: float
+    y: float
+    w: float
+    h: float
+    anchor_text: str = ""
+    use_text: bool = True
+    use_image: bool = True
+    weight: float = 1.0
+
+
+class AnchorOut(AnchorIn):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+
+
 # ---- Templates ----
 class TemplateCreate(BaseModel):
     name: str
@@ -70,6 +89,7 @@ class TemplateCreate(BaseModel):
     signature: dict = {}
     border: dict = {}
     fields: list[FieldIn] = []
+    anchors: list[AnchorIn] = []
 
 
 class TemplateUpdate(BaseModel):
@@ -78,6 +98,7 @@ class TemplateUpdate(BaseModel):
     signature: dict | None = None
     border: dict | None = None
     fields: list[FieldIn] | None = None
+    anchors: list[AnchorIn] | None = None
 
 
 class TemplateOut(BaseModel):
@@ -91,6 +112,7 @@ class TemplateOut(BaseModel):
     sample_document_id: int | None
     created_at: datetime
     fields: list[FieldOut]
+    anchors: list[AnchorOut] = []
     example_count: int = 0
 
 
@@ -100,6 +122,11 @@ class MatchResult(BaseModel):
     template_id: int | None
     template_name: str | None
     match_score: float
+    visual_score: float = 0.0
+    zone: dict | None = None  # {found, method, score, region, angle}
+    # Anclas localizadas: [{name, found, text_score, image_score, region}]
+    anchors: list[dict] | None = None
+    anchor_score: float = 0.0
     fields: dict
     width: int
     height: int

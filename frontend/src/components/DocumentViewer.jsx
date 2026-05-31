@@ -346,7 +346,12 @@ export default function DocumentViewer({
           return (
             <div
               key={r.key}
-              className={"region" + (active ? " active" : "") + (editable ? " editable" : "")}
+              className={
+                "region" +
+                (active ? " active" : "") +
+                (editable ? " editable" : "") +
+                (r.className ? " " + r.className : "")
+              }
               style={{
                 ...pct(r),
                 pointerEvents: editableBorder || panMode ? "none" : "auto",

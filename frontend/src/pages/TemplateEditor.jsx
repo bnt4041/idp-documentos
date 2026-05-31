@@ -14,6 +14,7 @@ const toKey = (s) =>
     .replace(/^_|_$/g, "");
 
 const FULL_BORDER = { x: 0, y: 0, w: 1, h: 1 };
+const ANCHOR_PREFIX = "__anchor__";
 
 // Conversión entre coords del escaneo completo (0..1) y coords relativas al borde
 const imgToRel = (box, b) => ({
@@ -46,9 +47,13 @@ export default function TemplateEditor() {
   const [quad, setQuad] = useState(null);
   const [quadMode, setQuadMode] = useState(false);
   const [fields, setFields] = useState([]); // coords RELATIVAS al borde
+  const [anchors, setAnchors] = useState([]); // hitos/anclas, coords RELATIVAS al borde
+  const [anchorMode, setAnchorMode] = useState(false); // dibujar crea anclas, no campos
   const [pending, setPending] = useState(null); // selección (coords de imagen)
   const [activeKey, setActiveKey] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestSource, setSuggestSource] = useState(null);  // "ollama" | "heuristic" | null
   const [error, setError] = useState("");
 
   // Carga de plantilla existente
@@ -69,6 +74,20 @@ export default function TemplateEditor() {
           w: f.w,
           h: f.h,
           sample_text: f.sample_text,
+        }))
+      );
+      setAnchors(
+        (t.anchors || []).map((a, i) => ({
+          key: `a${i}_${a.id ?? i}`,
+          name: a.name,
+          x: a.x,
+          y: a.y,
+          w: a.w,
+          h: a.h,
+          anchor_text: a.anchor_text || "",
+          use_text: a.use_text,
+          use_image: a.use_image,
+          weight: a.weight ?? 1.0,
         }))
       );
       if (t.sample_document_id) {
@@ -168,17 +187,43 @@ export default function TemplateEditor() {
         return { ...f, ...imgToRel(img, nb) };
       })
     );
+    setAnchors((prev) =>
+      prev.map((a) => {
+        const img = relToImg(a, border);
+        return { ...a, ...imgToRel(img, nb) };
+      })
+    );
     setBorder(nb);
   }
 
   // Mover/redimensionar una zona ya creada (coords de imagen -> relativas al borde)
   function onFieldRegionChange(key, box) {
     const rel = imgToRel(box, border);
+    if (key.startsWith(ANCHOR_PREFIX)) {
+      const ak = key.slice(ANCHOR_PREFIX.length);
+      setAnchors((prev) => prev.map((a) => (a.key === ak ? { ...a, ...rel } : a)));
+      return;
+    }
     setFields((prev) => prev.map((f) => (f.key === key ? { ...f, ...rel } : f)));
   }
 
-  // Al soltar, re-OCR de la nueva zona para refrescar el texto de muestra
+  // Al soltar, re-OCR de la nueva zona para refrescar el texto de muestra/ancla
   async function onFieldRegionCommit(key) {
+    if (key.startsWith(ANCHOR_PREFIX)) {
+      const ak = key.slice(ANCHOR_PREFIX.length);
+      const a = anchors.find((x) => x.key === ak);
+      if (!a || !doc) return;
+      const img = relToImg(a, border);
+      try {
+        const res = await api.ocrRegion(doc.id, img);
+        setAnchors((prev) =>
+          prev.map((x) => (x.key === ak ? { ...x, anchor_text: res.text || x.anchor_text } : x))
+        );
+      } catch {
+        /* noop */
+      }
+      return;
+    }
     let f;
     setFields((prev) => {
       f = prev.find((x) => x.key === key);
@@ -194,6 +239,30 @@ export default function TemplateEditor() {
     } catch {
       /* noop */
     }
+  }
+
+  // Crear un ancla a partir de la selección pendiente
+  function confirmAnchor(anchorName, useText, useImage) {
+    if (!pending || !anchorName.trim()) return;
+    const rel = imgToRel(pending, border);
+    const key = `a_${Date.now()}`;
+    setAnchors((prev) => [
+      ...prev,
+      {
+        key,
+        name: anchorName.trim(),
+        ...rel,
+        anchor_text: pending.sample_text || "",
+        use_text: useText,
+        use_image: useImage,
+        weight: 1.0,
+      },
+    ]);
+    setPending(null);
+  }
+
+  function removeAnchor(key) {
+    setAnchors((prev) => prev.filter((a) => a.key !== key));
   }
 
   async function rotate(deg) {
@@ -253,6 +322,53 @@ export default function TemplateEditor() {
     }
   }
 
+  async function handleSuggest() {
+    if (!doc) return;
+    setSuggesting(true);
+    setError("");
+    setSuggestSource(null);
+    try {
+      const result = await api.suggestFields(doc.id);
+      const suggestions = result.fields || [];
+      setSuggestSource(result.source || "heuristic");
+
+      if (suggestions.length === 0) {
+        setError("No se detectaron campos automáticamente. Puedes crearlos manualmente.");
+        return;
+      }
+
+      // Convertir sugerencias a campos relativos al borde y añadirlos
+      const existingKeys = new Set(fields.map((f) => f.key));
+      const newFields = [];
+      for (const s of suggestions) {
+        let key = s.key;
+        let counter = 1;
+        while (existingKeys.has(key)) {
+          counter++;
+          key = `${s.key}_${counter}`;
+        }
+        existingKeys.add(key);
+        // Las sugerencias vienen en coords de imagen (0..1), convertir a relativas al borde
+        const rel = imgToRel(
+          { x: s.x, y: s.y, w: s.w, h: s.h },
+          border,
+        );
+        newFields.push({
+          key,
+          name: s.name || key,
+          data_type: s.data_type || "text",
+          ...rel,
+          sample_text: s.sample_text || "",
+        });
+      }
+      setFields((prev) => [...prev, ...newFields]);
+    } catch (err) {
+      setError("Error al sugerir campos: " + err.message);
+    } finally {
+      setSuggesting(false);
+    }
+  }
+
   async function save() {
     setError("");
     if (!name.trim()) return setError("Ponle un nombre a la plantilla.");
@@ -275,6 +391,17 @@ export default function TemplateEditor() {
         signature: sig,
         border,
         fields,
+        anchors: anchors.map((a) => ({
+          name: a.name,
+          x: a.x,
+          y: a.y,
+          w: a.w,
+          h: a.h,
+          anchor_text: a.anchor_text || "",
+          use_text: a.use_text,
+          use_image: a.use_image,
+          weight: a.weight ?? 1.0,
+        })),
       };
       if (editing) await api.updateTemplate(id, payload);
       else await api.createTemplate(payload);
@@ -286,16 +413,43 @@ export default function TemplateEditor() {
     }
   }
 
-  // Regiones para el visor: campos (rel -> imagen) + pendiente (ya en imagen)
+  // Regiones para el visor: campos + anclas (rel -> imagen) + pendiente (ya en imagen)
   const regions = [
     ...fields.map((f) => ({ key: f.key, name: f.name, ...relToImg(f, border) })),
-    ...(pending ? [{ key: "__pending__", name: "Nuevo", ...pending }] : []),
+    ...anchors.map((a) => ({
+      key: ANCHOR_PREFIX + a.key,
+      name: "⚓ " + a.name,
+      className: "anchor",
+      ...relToImg(a, border),
+    })),
+    ...(pending
+      ? [
+          {
+            key: "__pending__",
+            name: anchorMode ? "Ancla" : "Nuevo",
+            className: anchorMode ? "anchor" : undefined,
+            ...pending,
+          },
+        ]
+      : []),
   ];
 
   const resultJson = Object.fromEntries(fields.map((f) => [f.key, f.sample_text]));
 
   return (
     <div className="editor">
+      {suggesting && (
+        <div className="loading-overlay">
+          <div className="loading-spinner">
+            <div className="spinner-ring" />
+            <div className="spinner-ring spinner-ring-2" />
+            <div className="spinner-ring spinner-ring-3" />
+            <div className="spinner-icon">🧠</div>
+          </div>
+          <p className="loading-text">Analizando documento con IA…</p>
+          <p className="loading-sub">Buscando campos de formulario automáticamente</p>
+        </div>
+      )}
       <div className="editor-left">
         {!doc ? (
           <div className="upload-zone">
@@ -342,6 +496,32 @@ export default function TemplateEditor() {
                     onClick={() => setBorderMode((m) => !m)}
                   >
                     {borderMode ? "✓ Ajustando bordes" : "✎ Ajustar bordes"}
+                  </button>
+                )}
+                {!borderMode && !quadMode && doc && (
+                  <button
+                    className="btn small"
+                    onClick={handleSuggest}
+                    disabled={suggesting}
+                    title={
+                      suggestSource === "ollama"
+                        ? "🧠 Campos sugeridos por IA (Ollama)"
+                        : "La IA analiza el OCR y propone campos automáticamente"
+                    }
+                  >
+                    {suggesting ? "⏳" : suggestSource === "ollama" ? "🧠✓" : "🧠"} Sugerir campos
+                  </button>
+                )}
+                {!borderMode && !quadMode && doc && (
+                  <button
+                    className={"btn small" + (anchorMode ? " primary" : "")}
+                    onClick={() => {
+                      setAnchorMode((m) => !m);
+                      setPending(null);
+                    }}
+                    title="Marca hitos/anclas (texto fijo y/o trozo de imagen): ayudan a elegir plantilla, orientar y alinear"
+                  >
+                    ⚓ {anchorMode ? "Anclas ✓" : "Anclas"}
                   </button>
                 )}
                 {borderMode && (
@@ -419,19 +599,29 @@ export default function TemplateEditor() {
           <>
             <h3>Campos ({fields.length})</h3>
             <p className="muted small">
-              Pincha una palabra o arrastra un recuadro sobre el documento para
-              seleccionar, luego nómbralo.
+              {anchorMode
+                ? "⚓ Modo anclas activo: dibuja un recuadro o pincha una palabra sobre un punto fijo (cabecera, logo, etiqueta) para crear un ancla."
+                : "Pincha una palabra o arrastra un recuadro sobre el documento para seleccionar, luego nómbralo."}
             </p>
 
-            {pending && (
-              <PendingField
-                sampleText={pending.sample_text}
-                scanning={pending.scanning}
-                confidence={pending.confidence}
-                onConfirm={confirmField}
-                onCancel={() => setPending(null)}
-              />
-            )}
+            {pending &&
+              (anchorMode ? (
+                <PendingAnchor
+                  sampleText={pending.sample_text}
+                  scanning={pending.scanning}
+                  confidence={pending.confidence}
+                  onConfirm={confirmAnchor}
+                  onCancel={() => setPending(null)}
+                />
+              ) : (
+                <PendingField
+                  sampleText={pending.sample_text}
+                  scanning={pending.scanning}
+                  confidence={pending.confidence}
+                  onConfirm={confirmField}
+                  onCancel={() => setPending(null)}
+                />
+              ))}
 
             <ul className="field-list">
               {fields.map((f) => (
@@ -451,6 +641,46 @@ export default function TemplateEditor() {
                 </li>
               ))}
             </ul>
+
+            <h3 className="anchor-head">⚓ Anclas / hitos ({anchors.length})</h3>
+            <p className="muted small">
+              Puntos fijos de referencia. Ayudan a elegir la plantilla correcta, a girar
+              y enderezar el documento y a alinear los campos.
+            </p>
+            {anchors.length === 0 ? (
+              <p className="muted small">
+                Sin anclas. Activa «⚓ Anclas» arriba y marca puntos fijos.
+              </p>
+            ) : (
+              <ul className="field-list anchor-list">
+                {anchors.map((a) => (
+                  <li
+                    key={a.key}
+                    className={ANCHOR_PREFIX + a.key === activeKey ? "active" : ""}
+                    onClick={() => setActiveKey(ANCHOR_PREFIX + a.key)}
+                  >
+                    <div>
+                      <strong>⚓ {a.name}</strong>
+                      <code>
+                        {a.use_text ? "texto" : ""}
+                        {a.use_text && a.use_image ? "+" : ""}
+                        {a.use_image ? "imagen" : ""}
+                      </code>
+                      <span className="muted small">{a.anchor_text || "—"}</span>
+                    </div>
+                    <button
+                      className="btn danger small"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeAnchor(a.key);
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
 
             <details className="json-preview">
               <summary>JSON resultado (muestra)</summary>
@@ -493,6 +723,61 @@ function PendingField({ sampleText, scanning, confidence, onConfirm, onCancel })
       <div className="row">
         <button className="btn primary small" onClick={() => onConfirm(name)}>
           Vincular campo
+        </button>
+        <button className="btn small" onClick={onCancel}>
+          Cancelar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PendingAnchor({ sampleText, scanning, confidence, onConfirm, onCancel }) {
+  const [name, setName] = useState("");
+  const [useText, setUseText] = useState(true);
+  const [useImage, setUseImage] = useState(true);
+  const hasText = Boolean((sampleText || "").trim());
+
+  return (
+    <div className="pending-field anchor-pending">
+      <div className="muted small">
+        ⚓ Nueva ancla — texto capturado:{" "}
+        {scanning ? <em>reconociendo…</em> : confidence != null && <span>(OCR {confidence}%)</span>}
+      </div>
+      <div className="captured">{sampleText || "(región sin texto — usa imagen)"}</div>
+      <input
+        autoFocus
+        placeholder="Nombre del ancla (ej. Cabecera, Logo)"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && onConfirm(name, useText, useImage)}
+      />
+      <div className="anchor-flags">
+        <label title="Casar por el texto OCR fijo de esta zona">
+          <input
+            type="checkbox"
+            checked={useText && hasText}
+            disabled={!hasText}
+            onChange={(e) => setUseText(e.target.checked)}
+          />{" "}
+          Usar texto
+        </label>
+        <label title="Casar por el trozo de imagen (logo, sello, gráfico)">
+          <input
+            type="checkbox"
+            checked={useImage}
+            onChange={(e) => setUseImage(e.target.checked)}
+          />{" "}
+          Usar imagen
+        </label>
+      </div>
+      <div className="row">
+        <button
+          className="btn primary small"
+          disabled={!(useImage || (useText && hasText))}
+          onClick={() => onConfirm(name, useText && hasText, useImage)}
+        >
+          Crear ancla
         </button>
         <button className="btn small" onClick={onCancel}>
           Cancelar

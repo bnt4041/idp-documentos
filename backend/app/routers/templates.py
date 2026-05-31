@@ -56,6 +56,8 @@ def create_template(payload: schemas.TemplateCreate, db: Session = Depends(get_d
     )
     for f in payload.fields:
         tpl.fields.append(models.TemplateField(**f.model_dump()))
+    for a in payload.anchors:
+        tpl.anchors.append(models.TemplateAnchor(**a.model_dump()))
     db.add(tpl)
     db.commit()
     db.refresh(tpl)
@@ -91,6 +93,11 @@ def update_template(
         db.flush()
         for f in payload.fields:
             tpl.fields.append(models.TemplateField(**f.model_dump()))
+    if payload.anchors is not None:
+        tpl.anchors.clear()
+        db.flush()
+        for a in payload.anchors:
+            tpl.anchors.append(models.TemplateAnchor(**a.model_dump()))
 
     db.commit()
     db.refresh(tpl)
@@ -102,5 +109,21 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
     tpl = db.get(models.Template, template_id)
     if not tpl:
         raise HTTPException(404, "Plantilla no encontrada")
+    # Borrado manual de todos los hijos en orden (por si las FK en la BD
+    # no tienen ON DELETE CASCADE / SET NULL tras un create_all inicial).
+    # Orden: records (SET NULL), learning_examples (DELETE), template_fields (DELETE)
+    db.query(models.Record).filter_by(template_id=template_id).update(
+        {"template_id": None}, synchronize_session="fetch"
+    )
+    db.query(models.LearningExample).filter_by(template_id=template_id).delete(
+        synchronize_session="fetch"
+    )
+    db.query(models.TemplateField).filter_by(template_id=template_id).delete(
+        synchronize_session="fetch"
+    )
+    db.query(models.TemplateAnchor).filter_by(template_id=template_id).delete(
+        synchronize_session="fetch"
+    )
+    db.flush()
     db.delete(tpl)
     db.commit()

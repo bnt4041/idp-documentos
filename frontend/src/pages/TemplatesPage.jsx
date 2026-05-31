@@ -22,8 +22,12 @@ export default function TemplatesPage() {
 
   async function remove(id) {
     if (!confirm("¿Eliminar esta plantilla?")) return;
-    await api.deleteTemplate(id);
-    load();
+    try {
+      await api.deleteTemplate(id);
+      load();
+    } catch (err) {
+      alert("Error al eliminar: " + err.message);
+    }
   }
 
   return (

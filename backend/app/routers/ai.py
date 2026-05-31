@@ -18,19 +18,26 @@ def _installed(name: str, models: list[str]) -> bool:
 
 @router.get("/status")
 def ai_status():
-    available = ollama_client.available()
-    models_installed = ollama_client.list_models() if available else []
-    model_ok = _installed(settings.ollama_model, models_installed)
-    embed_ok = _installed(settings.ollama_embed_model, models_installed)
+    # Generación (puede ser un backend remoto) y embeddings (backend local) se
+    # comprueban por separado: cada modelo contra el backend donde vive.
+    gen_available = ollama_client.available()
+    gen_models = ollama_client.list_models() if gen_available else []
+    model_ok = _installed(settings.ollama_model, gen_models)
+
+    embed_available = ollama_client.embed_available()
+    embed_models = ollama_client.list_embed_models() if embed_available else []
+    embed_ok = _installed(settings.ollama_embed_model, embed_models)
+
     return {
-        "available": available,
-        "ready": available and model_ok and embed_ok,
+        "available": gen_available,
+        "ready": gen_available and model_ok and embed_available and embed_ok,
         "model": settings.ollama_model,
         "model_installed": model_ok,
         "embed_model": settings.ollama_embed_model,
         "embed_installed": embed_ok,
         "vision": settings.ollama_vision,
-        "models_installed": models_installed,
+        "models_installed": gen_models,
+        "embed_models_installed": embed_models,
     }
 
 

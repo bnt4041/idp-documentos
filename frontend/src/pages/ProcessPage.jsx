@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import DocumentViewer from "../components/DocumentViewer.jsx";
 import Uploader from "../components/Uploader.jsx";
@@ -11,15 +11,290 @@ const toKey = (s) =>
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_|_$/g, "");
 
+// Metadatos visuales de cada estado de la cola
+const STATUS = {
+  processing: { label: "Procesando (OCR + IA)…", cls: "badge proc", spin: true },
+  review: { label: "⚠ Revisar", cls: "badge warn" },
+  done: { label: "✓ Listo", cls: "badge ok" },
+  confirmed: { label: "✓ Confirmado", cls: "badge ok" },
+  error: { label: "✗ Error", cls: "badge danger" },
+};
+
 export default function ProcessPage() {
+  const [activeRecord, setActiveRecord] = useState(null); // record abierto en el editor
+
+  if (activeRecord) {
+    return (
+      <DocumentEditor
+        record={activeRecord}
+        onBack={() => setActiveRecord(null)}
+      />
+    );
+  }
+  return <JobList onOpen={setActiveRecord} />;
+}
+
+// ===========================================================================
+// Vista LISTA: cola de documentos con estado, subida y sondeo en 2.º plano
+// ===========================================================================
+function JobList({ onOpen }) {
   const [templates, setTemplates] = useState([]);
   const [forcedTemplate, setForcedTemplate] = useState("");
+  const [jobs, setJobs] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [modal, setModal] = useState(null); // { job, data }
+  const pollRef = useRef(null);
+
+  // Nombre legible de un campo: el de la plantilla si existe, si no la clave
+  function fieldName(job, key) {
+    const tpl = templates.find((t) => t.id === job.template_id);
+    const f = tpl?.fields?.find((ff) => ff.key === key);
+    return f?.name || key;
+  }
+
+  async function openData(job, e) {
+    e.stopPropagation();
+    try {
+      const rec = await api.getRecord(job.record_id);
+      setModal({ job, data: rec.data || {} });
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function loadJobs() {
+    try {
+      const j = await api.listJobs();
+      setJobs(j);
+    } catch {
+      /* silencioso: reintenta en el siguiente tick */
+    }
+  }
+
+  useEffect(() => {
+    api.listTemplates().then(setTemplates).catch(() => {});
+    loadJobs();
+    pollRef.current = setInterval(loadJobs, 2500);
+    return () => clearInterval(pollRef.current);
+  }, []);
+
+  async function handleUpload(file) {
+    if (!file) return;
+    setUploading(true);
+    setError("");
+    try {
+      await api.createJob(file, forcedTemplate ? Number(forcedTemplate) : undefined);
+      await loadJobs();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function openJob(job) {
+    if (job.status === "processing") return;
+    try {
+      const rec = await api.getRecord(job.record_id);
+      onOpen(rec);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function remove(job, e) {
+    e.stopPropagation();
+    try {
+      await api.deleteRecord(job.record_id);
+      setJobs((prev) => prev.filter((j) => j.record_id !== job.record_id));
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  const processingCount = jobs.filter((j) => j.status === "processing").length;
+
+  return (
+    <div className="job-page">
+      <div className="job-uploader">
+        <h2>Procesar documentos</h2>
+        <p className="muted">
+          Sube un documento y se procesa en segundo plano (OCR + IA): se corrige
+          la orientación, se detecta la plantilla y se extraen los datos. Si algo
+          necesita revisión, el estado lo indicará.
+        </p>
+        <div className="form-row">
+          <label>Plantilla (opcional, si no se auto-detecta)</label>
+          <select
+            value={forcedTemplate}
+            onChange={(e) => setForcedTemplate(e.target.value)}
+          >
+            <option value="">Auto-detectar</option>
+            {templates.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <Uploader onFile={handleUpload} busy={uploading} label="Subir documento" />
+        {error && <p className="error">{error}</p>}
+      </div>
+
+      <div className="job-list">
+        <div className="job-list-head">
+          <h3>Documentos {jobs.length > 0 && `(${jobs.length})`}</h3>
+          {processingCount > 0 && (
+            <span className="muted small">⏳ {processingCount} en proceso…</span>
+          )}
+        </div>
+
+        {jobs.length === 0 ? (
+          <p className="muted">Aún no has procesado documentos.</p>
+        ) : (
+          <table className="job-table">
+            <thead>
+              <tr>
+                <th>Documento</th>
+                <th>Plantilla</th>
+                <th>Estado</th>
+                <th>Similitud</th>
+                <th>Campos</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.map((job) => {
+                const st = STATUS[job.status] || STATUS.review;
+                return (
+                  <tr
+                    key={job.record_id}
+                    className={"job-row" + (job.status === "processing" ? " disabled" : "")}
+                    onClick={() => openJob(job)}
+                  >
+                    <td className="job-name">{job.filename}</td>
+                    <td>{job.template_name || <span className="muted">—</span>}</td>
+                    <td>
+                      <span className={st.cls}>
+                        {st.spin && <span className="mini-spinner" />}
+                        {st.label}
+                      </span>
+                    </td>
+                    <td>
+                      {job.match_score
+                        ? `${Math.round(job.match_score * 100)}%`
+                        : "—"}
+                    </td>
+                    <td>{job.n_fields || 0}</td>
+                    <td className="job-actions">
+                      {job.status !== "processing" && (
+                        <>
+                          <button
+                            className="btn small"
+                            title="Ver datos extraídos"
+                            onClick={(e) => openData(job, e)}
+                          >
+                            👁 Datos
+                          </button>
+                          <button
+                            className="btn small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openJob(job);
+                            }}
+                          >
+                            {job.status === "review" ? "Revisar" : "Abrir"}
+                          </button>
+                        </>
+                      )}
+                      <button
+                        className="btn danger small"
+                        title="Eliminar"
+                        onClick={(e) => remove(job, e)}
+                      >
+                        ✕
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {modal && (
+        <div className="modal-overlay" onClick={() => setModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>{modal.job.filename}</h3>
+              <button className="btn small" onClick={() => setModal(null)}>
+                ✕
+              </button>
+            </div>
+            <p className="muted small">
+              {modal.job.template_name || "Sin plantilla"}
+              {modal.job.match_score
+                ? ` · ${Math.round(modal.job.match_score * 100)}% similitud`
+                : ""}
+            </p>
+
+            {Object.keys(modal.data).length === 0 ? (
+              <p className="muted">Sin datos extraídos.</p>
+            ) : (
+              <div className="modal-form">
+                {Object.entries(modal.data).map(([k, v]) => (
+                  <div className="modal-field" key={k}>
+                    <label>{fieldName(modal.job, k)}</label>
+                    <input readOnly value={String(v ?? "")} />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <details className="json-preview">
+              <summary>JSON</summary>
+              <pre>{JSON.stringify(modal.data, null, 2)}</pre>
+            </details>
+
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setModal(null)}>
+                Cerrar
+              </button>
+              <button
+                className="btn primary"
+                onClick={() => {
+                  const j = modal.job;
+                  setModal(null);
+                  openJob(j);
+                }}
+              >
+                Editar a fondo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// Vista DETALLE: editor de revisión (carga desde un registro existente)
+// ===========================================================================
+function DocumentEditor({ record, onBack }) {
+  const documentId = record.document_id;
+  const templateId = record.template_id;
+
+  const [templates, setTemplates] = useState([]);
+  const [chosenTemplate, setChosenTemplate] = useState(templateId ?? "");
   const [doc, setDoc] = useState(null);
   const [result, setResult] = useState(null);
-  const [fields, setFields] = useState({}); // {key:{name,region,confidence,n_words}}
-  const [values, setValues] = useState({}); // {key: value}
+  const [fields, setFields] = useState({});
+  const [values, setValues] = useState({});
   const [activeKey, setActiveKey] = useState(null);
-  const [pending, setPending] = useState(null); // {box,text,confidence,scanning}
+  const [pending, setPending] = useState(null);
   const [zoom, setZoom] = useState(1);
   const [panMode, setPanMode] = useState(false);
   const [imgRev, setImgRev] = useState(0);
@@ -34,18 +309,46 @@ export default function ProcessPage() {
   const [saved, setSaved] = useState(false);
   const [scanning, setScanning] = useState({});
 
+  // Carga inicial: documento + proceso + valores guardados del registro
   useEffect(() => {
-    api.listTemplates().then(setTemplates);
     api.aiStatus().then(setAiStatus).catch(() => setAiStatus({ available: false }));
-  }, []);
+    api.listTemplates().then(setTemplates).catch(() => {});
+    (async () => {
+      setBusy(true);
+      try {
+        const d = await api.getDocument(documentId);
+        setDoc(d);
+        const res = await api.processDocument(documentId, templateId || undefined);
+        applyResult(res, record.data);
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setBusy(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentId]);
 
-  // Extracción con IA: rellena valores Y actualiza las regiones (proporcionalidad)
-  async function runAI(docId, templateId) {
-    if (!templateId || !aiStatus?.ready) return;
+  function applyResult(res, savedData) {
+    setResult(res);
+    setBorder(res.border || { x: 0, y: 0, w: 1, h: 1 });
+    const fs = {};
+    const vs = {};
+    Object.entries(res.fields).forEach(([k, v]) => {
+      fs[k] = { name: v.name, region: v.region, confidence: v.confidence, n_words: v.n_words };
+      vs[k] = v.value;
+    });
+    setFields(fs);
+    // Los valores guardados (IA del job o revisión previa) tienen prioridad
+    setValues(savedData ? { ...vs, ...savedData } : vs);
+  }
+
+  async function runAI() {
+    if (!result?.template_id || !aiStatus?.ready) return;
     setAiBusy(true);
     setError("");
     try {
-      const res = await api.aiExtract(docId, templateId);
+      const res = await api.aiExtract(documentId, result.template_id);
       setValues((prev) => {
         const n = { ...prev };
         Object.entries(res.fields).forEach(([k, v]) => (n[k] = v.value));
@@ -65,22 +368,18 @@ export default function ProcessPage() {
     }
   }
 
-  async function handleUpload(file) {
-    if (!file) return;
+  async function reprocess(tplId = chosenTemplate) {
+    const res = await api.processDocument(documentId, tplId || undefined);
+    applyResult(res);
+  }
+
+  // Cambiar manualmente la plantilla cuando la auto-detección se equivoca
+  async function changeTemplate(value) {
+    setChosenTemplate(value);
     setBusy(true);
     setError("");
-    setResult(null);
-    setSaved(false);
-    setPending(null);
     try {
-      const d = await api.uploadDocument(file);
-      setDoc(d);
-      const res = await api.processDocument(
-        d.id,
-        forcedTemplate ? Number(forcedTemplate) : undefined
-      );
-      applyResult(res);
-      if (res.template_id) await runAI(d.id, res.template_id); // IA automática
+      await reprocess(value);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -88,33 +387,31 @@ export default function ProcessPage() {
     }
   }
 
-  function applyResult(res) {
-    setResult(res);
-    setBorder(res.border || { x: 0, y: 0, w: 1, h: 1 });
-    const fs = {};
-    const vs = {};
-    Object.entries(res.fields).forEach(([k, v]) => {
-      fs[k] = { name: v.name, region: v.region, confidence: v.confidence, n_words: v.n_words };
-      vs[k] = v.value;
-    });
-    setFields(fs);
-    setValues(vs);
-  }
-
   async function rotate(deg) {
     if (!doc) return;
     setBusy(true);
     setError("");
     try {
-      const d = await api.rotateDocument(doc.id, deg);
+      const d = await api.rotateDocument(documentId, deg);
       setDoc(d);
       setImgRev((v) => v + 1);
-      const res = await api.processDocument(
-        d.id,
-        forcedTemplate ? Number(forcedTemplate) : undefined
-      );
-      applyResult(res);
-      if (res.template_id) await runAI(d.id, res.template_id); // IA automática
+      await reprocess();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function autoOrient() {
+    if (!doc) return;
+    setBusy(true);
+    setError("");
+    try {
+      const d = await api.autoOrient(documentId, chosenTemplate || undefined);
+      setDoc(d);
+      setImgRev((v) => v + 1);
+      await reprocess();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -137,11 +434,10 @@ export default function ProcessPage() {
       .join(" ");
   }
 
-  // Selección de una zona nueva -> re-OCR y abre el panel de asignación
   async function onRegionDraw(box) {
     setPending({ box, text: textInRegion(box), confidence: null, scanning: true });
     try {
-      const res = await api.ocrRegion(doc.id, box);
+      const res = await api.ocrRegion(documentId, box);
       setPending((p) =>
         p ? { ...p, text: res.text || p.text, confidence: res.confidence, scanning: false } : p
       );
@@ -154,7 +450,6 @@ export default function ProcessPage() {
     setPending({ box: word.box, text: word.text, confidence: word.conf, scanning: false });
   }
 
-  // Asigna el texto detectado a un campo existente o crea uno nuevo
   function assign(target, newName) {
     if (!pending) return;
     let key = target;
@@ -166,7 +461,6 @@ export default function ProcessPage() {
         [key]: { name: newName.trim(), region: pending.box, confidence: pending.confidence ?? 0, n_words: 0 },
       }));
     } else {
-      // Actualiza la región resaltada del campo a la zona seleccionada
       setFields((prev) => ({
         ...prev,
         [key]: { ...prev[key], region: pending.box, confidence: pending.confidence ?? prev[key].confidence },
@@ -181,19 +475,13 @@ export default function ProcessPage() {
     setFields((prev) => ({ ...prev, [key]: { ...prev[key], region: box } }));
   }
 
-  // Persiste el borde corregido y re-procesa (re-posiciona los campos proporcionalmente)
   async function applyBorder() {
     if (!doc || !border) return;
     setBusy(true);
     setError("");
     try {
-      await api.updateBorder(doc.id, border);
-      const res = await api.processDocument(
-        doc.id,
-        result?.template_id || (forcedTemplate ? Number(forcedTemplate) : undefined)
-      );
-      applyResult(res);
-      if (res.template_id) await runAI(doc.id, res.template_id);
+      await api.updateBorder(documentId, border);
+      await reprocess();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -202,21 +490,20 @@ export default function ProcessPage() {
   }
 
   function toggleBorderMode() {
-    if (borderMode) applyBorder(); // al salir del modo, aplica y re-procesa
+    if (borderMode) applyBorder();
     setBorderMode((m) => !m);
   }
 
   async function autoDetectBorder() {
     if (!doc) return;
     try {
-      const b = await api.detectBorder(doc.id);
+      const b = await api.detectBorder(documentId);
       setBorder(b);
     } catch (err) {
       setError(err.message);
     }
   }
 
-  // Enderezar (perspectiva con 4 puntos)
   function startQuad() {
     const b = border || { x: 0, y: 0, w: 1, h: 1 };
     setQuad({
@@ -238,17 +525,12 @@ export default function ProcessPage() {
     setBusy(true);
     setError("");
     try {
-      const d = await api.rectifyDocument(doc.id, quad);
+      const d = await api.rectifyDocument(documentId, quad);
       setDoc(d);
       setImgRev((v) => v + 1);
       setQuadMode(false);
       setQuad(null);
-      const res = await api.processDocument(
-        d.id,
-        result?.template_id || (forcedTemplate ? Number(forcedTemplate) : undefined)
-      );
-      applyResult(res);
-      if (res.template_id) await runAI(d.id, res.template_id);
+      await reprocess();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -261,7 +543,7 @@ export default function ProcessPage() {
     if (!region) return;
     setScanning((s) => ({ ...s, [key]: true }));
     try {
-      const res = await api.ocrRegion(doc.id, region);
+      const res = await api.ocrRegion(documentId, region);
       setValues((prev) => ({ ...prev, [key]: res.text }));
     } catch (err) {
       setError(err.message);
@@ -290,9 +572,9 @@ export default function ProcessPage() {
       const regions = Object.fromEntries(
         Object.entries(fields).map(([k, v]) => [k, v.region])
       );
-      await api.createRecord({
+      await api.updateRecord(record.record_id ?? record.id, {
         template_id: result.template_id,
-        document_id: result.document_id,
+        document_id: documentId,
         data: values,
         match_score: result.match_score,
         status: "confirmed",
@@ -300,6 +582,7 @@ export default function ProcessPage() {
         learn: true,
       });
       setSaved(true);
+      setTimeout(() => onBack(), 600);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -316,31 +599,30 @@ export default function ProcessPage() {
 
   return (
     <div className="editor">
+      {(busy || aiBusy) && (
+        <div className="loading-overlay">
+          <div className="loading-spinner">
+            <div className="spinner-ring" />
+            <div className="spinner-ring spinner-ring-2" />
+            <div className="spinner-ring spinner-ring-3" />
+            <div className="spinner-icon">📄</div>
+          </div>
+          <p className="loading-text">
+            {aiBusy ? "🧠 Extrayendo datos con IA…" : busy ? "⏳ Procesando documento…" : ""}
+          </p>
+          <p className="loading-sub">Esto puede tardar unos segundos</p>
+        </div>
+      )}
       <div className="editor-left">
         {!doc ? (
-          <div className="upload-zone">
-            <h2>Procesar documento</h2>
-            <p className="muted">
-              Sube un documento. Se corrige su orientación, se detecta la plantilla
-              más parecida y se rellenan los campos entrenados.
-            </p>
-            <div className="form-row">
-              <label>Plantilla (opcional, si no se auto-detecta)</label>
-              <select value={forcedTemplate} onChange={(e) => setForcedTemplate(e.target.value)}>
-                <option value="">Auto-detectar</option>
-                {templates.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <Uploader onFile={handleUpload} busy={busy} label="Subir documento" />
-          </div>
+          <p className="muted" style={{ padding: 24 }}>Cargando documento…</p>
         ) : (
           <>
             <div className="viewer-toolbar">
               <div className="zoom-controls">
+                <button className="btn small" onClick={onBack} title="Volver a la lista">
+                  ← Lista
+                </button>
                 <button className="btn small" onClick={() => setZoom((z) => Math.max(0.25, +(z - 0.25).toFixed(2)))}>
                   −
                 </button>
@@ -354,7 +636,7 @@ export default function ProcessPage() {
                 <button
                   className={"btn small" + (panMode ? " primary" : "")}
                   onClick={() => setPanMode((m) => !m)}
-                  title="Mover documento (o botón central del ratón)"
+                  title="Mover documento"
                 >
                   ✋
                 </button>
@@ -363,6 +645,9 @@ export default function ProcessPage() {
                 </button>
                 <button className="btn small" onClick={() => rotate(90)} title="Girar 90° derecha" disabled={busy}>
                   ↻
+                </button>
+                <button className="btn small" onClick={autoOrient} title="Auto-enderezar según la plantilla" disabled={busy}>
+                  🧭 Auto
                 </button>
               </div>
               <div className="border-controls">
@@ -404,7 +689,7 @@ export default function ProcessPage() {
               </div>
             </div>
             <DocumentViewer
-              imageUrl={`${api.documentImageUrl(doc.id)}?v=${imgRev}`}
+              imageUrl={`${api.documentImageUrl(documentId)}?v=${imgRev}`}
               words={doc.ocr_words}
               regions={regions}
               activeKey={activeKey}
@@ -431,14 +716,54 @@ export default function ProcessPage() {
 
       <aside className="editor-right">
         {!result ? (
-          <p className="muted">Esperando documento…</p>
+          <p className="muted">Cargando…</p>
         ) : (
           <>
             <div className="match-info">
               <h3>{result.template_name || "Sin plantilla"}</h3>
-              <span className={"badge " + (lowConfidence ? "warn" : "ok")}>
-                Confianza {(result.match_score * 100).toFixed(0)}%
-              </span>
+              <div className="form-row template-switch">
+                <label>Plantilla</label>
+                <select
+                  value={chosenTemplate}
+                  onChange={(e) => changeTemplate(e.target.value)}
+                  disabled={busy}
+                  title="Cámbiala si la detección automática se equivocó"
+                >
+                  <option value="">Auto-detectar</option>
+                  {templates.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="match-scores">
+                <span className={"badge " + (lowConfidence ? "warn" : "ok")}>
+                  {(result.match_score * 100).toFixed(0)}% similitud
+                </span>
+                {result.visual_score > 0 && (
+                  <span className="badge visual-score" title="Similitud visual (ORB) con la imagen de muestra">
+                    👁️ {(result.visual_score * 100).toFixed(0)}% visual
+                  </span>
+                )}
+                {result.anchors && result.anchors.length > 0 && (
+                  <span
+                    className={
+                      "badge " +
+                      (result.anchors.every((a) => a.found) ? "ok" : "warn")
+                    }
+                    title={result.anchors
+                      .map(
+                        (a) =>
+                          `${a.found ? "✓" : "✗"} ${a.name || "(ancla)"}`
+                      )
+                      .join("\n")}
+                  >
+                    🎯 {result.anchors.filter((a) => a.found).length}/
+                    {result.anchors.length} anclas
+                  </span>
+                )}
+              </div>
             </div>
             {!result.template_id && (
               <p className="warn-text">
@@ -456,7 +781,7 @@ export default function ProcessPage() {
                   {aiBusy
                     ? `🧠 Extrayendo con IA (${aiStatus?.model})…`
                     : aiStatus?.ready
-                    ? `🧠 IA aplicada automáticamente (${aiStatus.model})`
+                    ? `🧠 IA disponible (${aiStatus.model})`
                     : aiStatus?.available
                     ? `Ollama arriba, falta descargar el modelo — ver README`
                     : "IA local no disponible — solo extracción geométrica"}
@@ -464,7 +789,7 @@ export default function ProcessPage() {
                 {aiStatus?.ready && (
                   <button
                     className="btn small"
-                    onClick={() => runAI(doc.id, result.template_id)}
+                    onClick={runAI}
                     disabled={aiBusy}
                     title="Volver a extraer con IA"
                   >
@@ -540,15 +865,18 @@ export default function ProcessPage() {
 
             {error && <p className="error">{error}</p>}
             {saved ? (
-              <p className="success">✓ Registro creado correctamente.</p>
+              <p className="success">✓ Registro confirmado.</p>
             ) : (
               <div className="editor-actions">
+                <button className="btn" onClick={onBack} disabled={busy}>
+                  Cancelar
+                </button>
                 <button
                   className="btn primary"
                   onClick={confirm}
                   disabled={busy || Object.keys(fields).length === 0}
                 >
-                  Aceptar y crear registro
+                  Aceptar y confirmar
                 </button>
               </div>
             )}

@@ -33,6 +33,12 @@ export const api = {
     }),
   rotateDocument: (id, degrees) =>
     http(`/api/documents/${id}/rotate?degrees=${degrees}`, { method: "POST" }),
+  autoOrient: (id, templateId) =>
+    http(
+      `/api/documents/${id}/auto-orient` +
+        (templateId ? `?template_id=${templateId}` : ""),
+      { method: "POST" }
+    ),
   rectifyDocument: (id, quad) =>
     http(`/api/documents/${id}/rectify`, {
       method: "POST",
@@ -47,6 +53,8 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(box),
     }),
+  suggestFields: (id) =>
+    http(`/api/documents/${id}/suggest-fields`, { method: "POST" }),
 
   // Plantillas
   listTemplates: () => http("/api/templates"),
@@ -65,6 +73,8 @@ export const api = {
     }),
   deleteTemplate: (id) => http(`/api/templates/${id}`, { method: "DELETE" }),
 
+  getDocument: (id) => http(`/api/documents/${id}`),
+
   // Procesado y registros
   processDocument: (docId, templateId) =>
     http(
@@ -78,11 +88,33 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }),
+  updateRecord: (id, payload) =>
+    http(`/api/records/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  getRecord: (id) => http(`/api/records/${id}`),
+  deleteRecord: (id) => http(`/api/records/${id}`, { method: "DELETE" }),
   listRecords: (templateId) =>
     http("/api/records" + (templateId ? `?template_id=${templateId}` : "")),
+
+  // Cola de procesado en segundo plano (jobs)
+  createJob: (file, templateId) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return http(
+      `/api/jobs` + (templateId ? `?template_id=${templateId}` : ""),
+      { method: "POST", body: fd }
+    );
+  },
+  listJobs: () => http("/api/jobs"),
 
   // IA / RAG (Ollama)
   aiStatus: () => http("/api/ai/status"),
   aiExtract: (docId, templateId) =>
     http(`/api/ai/extract/${docId}?template_id=${templateId}`, { method: "POST" }),
+
+  // Admin
+  resetAll: () => http("/api/reset", { method: "POST" }),
 };

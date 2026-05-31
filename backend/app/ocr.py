@@ -15,6 +15,7 @@ import pytesseract
 from PIL import Image
 from pdf2image import convert_from_bytes
 
+from . import preprocessing
 from .config import settings
 
 # Tamaño de la rejilla de densidad de texto usada en la firma (GRID x GRID celdas)
@@ -49,6 +50,23 @@ def correct_orientation(image: Image.Image) -> tuple[Image.Image, int]:
     return image, rotate
 
 
+def deskew_image(image: Image.Image, fine: bool = True) -> tuple[Image.Image, float, int]:
+    """Enderezado completo: OSD (90° steps) + deskew fino (Hough, 0.5°–45°).
+
+    Args:
+        image: imagen PIL RGB
+        fine: si True, aplica también deskew fino tras OSD
+
+    Returns:
+        (imagen_enderezada, ángulo_fino, ángulo_OSD)
+    """
+    image, osd_angle = correct_orientation(image)
+    fine_angle = 0.0
+    if fine:
+        image, fine_angle = preprocessing.deskew_fine(image)
+    return image, fine_angle, osd_angle
+
+
 def run_ocr(image: Image.Image) -> list[dict[str, Any]]:
     """Devuelve la lista de palabras detectadas con su caja normalizada."""
     width, height = image.size
@@ -80,6 +98,46 @@ def run_ocr(image: Image.Image) -> list[dict[str, Any]]:
             }
         )
     return words
+
+
+def run_ocr_multi(image: Image.Image) -> tuple[list[dict[str, Any]], str]:
+    """OCR con múltiples variantes de filtro y fusión de resultados (ensemble).
+
+    Prueba varias combinaciones de preprocesado y devuelve el mejor conjunto
+    de palabras detectadas según la confianza media y la cantidad de texto.
+
+    Returns:
+        (palabras, nombre_del_filtro_ganador)
+    """
+    variants = preprocessing.generate_filtered_variants(image)
+
+    best_words: list[dict[str, Any]] = []
+    best_score = 0.0
+    best_name = "original"
+
+    for name, variant in variants.items():
+        try:
+            words = run_ocr(variant)
+        except Exception:  # noqa: BLE001
+            continue
+
+        if not words:
+            continue
+
+        # Puntuación: cantidad de palabras * confianza media
+        avg_conf = sum(w["conf"] for w in words) / len(words)
+        score = len(words) * avg_conf
+        if score > best_score:
+            best_score = score
+            best_words = words
+            best_name = name
+
+    # Si ninguna variante mejoró significativamente, usar el OCR original
+    if not best_words:
+        best_words = run_ocr(image)
+        best_name = "original"
+
+    return best_words, best_name
 
 
 def ocr_region(image: Image.Image, box: dict[str, float]) -> dict[str, Any]:
@@ -256,13 +314,48 @@ def compute_signature(
     }
 
 
-def process_upload(content: bytes, content_type: str) -> dict[str, Any]:
-    """Pipeline completo: imagen -> orientación -> OCR -> borde -> firma."""
+def process_upload(
+    content: bytes,
+    content_type: str,
+    deskew: bool = False,  # False por defecto: solo OSD, sin Hough fino
+    multi_filter: bool = False,
+) -> dict[str, Any]:
+    """Pipeline completo: imagen -> orientación (OSD) -> OCR -> borde -> firma.
+
+    Args:
+        content: bytes del fichero
+        content_type: MIME type
+        deskew: si True, aplica enderezado fino (Hough) además de OSD.
+                False por defecto para evitar falsos positivos.
+        multi_filter: si True, prueba múltiples filtros y elige el mejor OCR
+
+    Returns:
+        dict con image, width, height, ocr_words, signature, border, rotation,
+        deskew_angle, filter_used, quality
+    """
     image = load_first_page(content, content_type)
-    image, rotation = correct_orientation(image)
-    words = run_ocr(image)
+
+    # Enderezado: siempre OSD (90° steps, seguro), Hough solo si se pide
+    fine_angle = 0.0
+    osd_angle = 0
+    if deskew:
+        image, fine_angle, osd_angle = deskew_image(image, fine=True)
+    else:
+        image, osd_angle = correct_orientation(image)
+
+    # Evaluar calidad de imagen antes de OCR
+    quality = preprocessing.evaluate_image_quality(image)
+
+    # OCR (con o sin multi-filtro)
+    filter_used = "original"
+    if multi_filter:
+        words, filter_used = run_ocr_multi(image)
+    else:
+        words = run_ocr(image)
+
     border = detect_border(image)
     signature = compute_signature(image, words, border)
+
     return {
         "image": image,
         "width": image.size[0],
@@ -270,5 +363,8 @@ def process_upload(content: bytes, content_type: str) -> dict[str, Any]:
         "ocr_words": words,
         "signature": signature,
         "border": border,
-        "rotation": rotation,
+        "rotation": osd_angle,
+        "deskew_angle": fine_angle,
+        "filter_used": filter_used,
+        "quality": quality,
     }

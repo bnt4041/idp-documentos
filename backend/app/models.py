@@ -2,6 +2,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -54,6 +55,9 @@ class Template(Base):
     fields: Mapped[list["TemplateField"]] = relationship(
         back_populates="template", cascade="all, delete-orphan"
     )
+    anchors: Mapped[list["TemplateAnchor"]] = relationship(
+        back_populates="template", cascade="all, delete-orphan"
+    )
 
 
 class TemplateField(Base):
@@ -79,6 +83,34 @@ class TemplateField(Base):
     template: Mapped[Template] = relationship(back_populates="fields")
 
 
+class TemplateAnchor(Base):
+    """Hito/ancla de una plantilla: zona de referencia con texto fijo y/o trozo de
+    imagen que sirve para elegir la plantilla, orientar/enderezar el documento y
+    alinear las regiones de los campos."""
+
+    __tablename__ = "template_anchors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    template_id: Mapped[int] = mapped_column(
+        ForeignKey("templates.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(String(255), default="")
+    # Región normalizada 0..1, relativa al borde (igual que TemplateField)
+    x: Mapped[float] = mapped_column(Float)
+    y: Mapped[float] = mapped_column(Float)
+    w: Mapped[float] = mapped_column(Float)
+    h: Mapped[float] = mapped_column(Float)
+    # Texto fijo esperado en la zona (referencia para el matching por OCR)
+    anchor_text: Mapped[str] = mapped_column(Text, default="")
+    # Señales activas del ancla
+    use_text: Mapped[bool] = mapped_column(Boolean, default=True)
+    use_image: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Importancia relativa en el score de anclas
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
+
+    template: Mapped[Template] = relationship(back_populates="anchors")
+
+
 class LearningExample(Base):
     """Documento confirmado: base de conocimiento del RAG (dataset + embedding)."""
 
@@ -89,7 +121,7 @@ class LearningExample(Base):
         ForeignKey("templates.id", ondelete="CASCADE"), nullable=True
     )
     document_id: Mapped[int | None] = mapped_column(
-        ForeignKey("documents.id"), nullable=True
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
     )
     # {key: {value, region:{x,y,w,h} relativa al borde}}
     fields: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -106,10 +138,10 @@ class Record(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     template_id: Mapped[int | None] = mapped_column(
-        ForeignKey("templates.id"), nullable=True
+        ForeignKey("templates.id", ondelete="SET NULL"), nullable=True
     )
     document_id: Mapped[int | None] = mapped_column(
-        ForeignKey("documents.id"), nullable=True
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
     )
     # JSON final {clave: valor}
     data: Mapped[dict] = mapped_column(JSON, default=dict)

@@ -1,0 +1,230 @@
+{
+  "info": {
+    "name": "Ollama API — bot.dealerbest.com",
+    "_postman_id": "ollama-dealerbest-2026",
+    "description": "API REST de Ollama via HTTPS.\nBase URL: https://bot.dealerbest.com/ollama\nAuth: Bearer token heredado por todas las peticiones.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url",     "value": "https://bot.dealerbest.com/ollama", "type": "string" },
+    { "key": "api_key",      "value": "0fc1fc15c6b9c12dc90fb14c6b523f1894a9f56e236d19c45db023efddfa3fb8", "type": "string" },
+    { "key": "model_chat",   "value": "llama3.2:3b", "type": "string" },
+    { "key": "model_vision", "value": "llava:7b",    "type": "string" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{api_key}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "Modelos",
+      "item": [
+        {
+          "name": "Listar modelos instalados",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/tags", "host": ["{{base_url}}"], "path": ["api","tags"] },
+            "description": "Devuelve todos los modelos descargados en Ollama."
+          }
+        },
+        {
+          "name": "Modelos en ejecución",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/ps", "host": ["{{base_url}}"], "path": ["api","ps"] },
+            "description": "Modelos actualmente cargados en memoria."
+          }
+        },
+        {
+          "name": "Info de un modelo",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{model_chat}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/api/show", "host": ["{{base_url}}"], "path": ["api","show"] },
+            "description": "Devuelve modelfile, parámetros, plantilla y detalles del modelo."
+          }
+        },
+        {
+          "name": "Descargar modelo (pull)",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"llama3.2:3b\",\n  \"stream\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/api/pull", "host": ["{{base_url}}"], "path": ["api","pull"] },
+            "description": "Descarga un modelo desde el registro de Ollama."
+          }
+        },
+        {
+          "name": "Eliminar modelo",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "DELETE",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"llama3.2:1b\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/api/delete", "host": ["{{base_url}}"], "path": ["api","delete"] },
+            "description": "Elimina un modelo descargado."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Chat",
+      "item": [
+        {
+          "name": "Chat — respuesta completa",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model_chat}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"Eres un asistente de soporte tecnico. Responde en espanol de forma concisa.\" },\n    { \"role\": \"user\",   \"content\": \"Mi impresora no imprime. Que puedo hacer?\" }\n  ],\n  \"stream\": false,\n  \"options\": { \"num_thread\": 8, \"num_ctx\": 4096, \"num_predict\": 600 }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/api/chat", "host": ["{{base_url}}"], "path": ["api","chat"] },
+            "description": "Llamada de chat sin streaming. Devuelve la respuesta completa en un JSON."
+          }
+        },
+        {
+          "name": "Chat — con historial",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model_chat}}\",\n  \"messages\": [\n    { \"role\": \"system\",    \"content\": \"Eres un asistente de soporte tecnico.\" },\n    { \"role\": \"user\",      \"content\": \"No puedo acceder al correo.\" },\n    { \"role\": \"assistant\", \"content\": \"Que error te aparece al intentar entrar?\" },\n    { \"role\": \"user\",      \"content\": \"Dice que la contrasena es incorrecta.\" }\n  ],\n  \"stream\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/api/chat", "host": ["{{base_url}}"], "path": ["api","chat"] },
+            "description": "Chat con historial de conversacion multiple."
+          }
+        },
+        {
+          "name": "Chat — vision (imagen + texto)",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model_vision}}\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Que muestra esta imagen?\",\n      \"images\": [\"<BASE64_DE_LA_IMAGEN_AQUI>\"]\n    }\n  ],\n  \"stream\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/api/chat", "host": ["{{base_url}}"], "path": ["api","chat"] },
+            "description": "Chat con imagen adjunta en base64. Usa el modelo llava:7b."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Generate (completion)",
+      "item": [
+        {
+          "name": "Generate — texto simple",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model_chat}}\",\n  \"prompt\": \"Explica en 3 pasos como reiniciar un router.\",\n  \"stream\": false,\n  \"options\": { \"temperature\": 0.7, \"num_predict\": 400 }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/api/generate", "host": ["{{base_url}}"], "path": ["api","generate"] },
+            "description": "Completion clasico de texto (sin formato chat)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "OpenAI Compatible (/v1)",
+      "item": [
+        {
+          "name": "[v1] Chat Completions",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model_chat}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"Eres un asistente de soporte tecnico.\" },\n    { \"role\": \"user\",   \"content\": \"Como configuro una VPN?\" }\n  ],\n  \"temperature\": 0.7,\n  \"max_tokens\": 600\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/v1/chat/completions", "host": ["{{base_url}}"], "path": ["v1","chat","completions"] },
+            "description": "Endpoint compatible con OpenAI. Util para librerias como openai-python apuntando a Ollama."
+          }
+        },
+        {
+          "name": "[v1] Listar modelos",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/v1/models", "host": ["{{base_url}}"], "path": ["v1","models"] },
+            "description": "Lista modelos en formato compatible con OpenAI."
+          }
+        },
+        {
+          "name": "[v1] Embeddings",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model_chat}}\",\n  \"input\": \"El servidor no responde desde las 8:00 AM.\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/v1/embeddings", "host": ["{{base_url}}"], "path": ["v1","embeddings"] },
+            "description": "Genera embeddings vectoriales de un texto."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sistema",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/", "host": ["{{base_url}}"], "path": [""] },
+            "description": "Devuelve 'Ollama is running' si el servicio esta activo."
+          }
+        },
+        {
+          "name": "Version",
+          "request": {
+            "auth": { "type": "inherit" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/version", "host": ["{{base_url}}"], "path": ["api","version"] },
+            "description": "Devuelve la version instalada de Ollama."
+          }
+        }
+      ]
+    }
+  ]
+}
