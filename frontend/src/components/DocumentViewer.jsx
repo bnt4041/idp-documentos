@@ -342,7 +342,12 @@ export default function DocumentViewer({
 
         {regions.map((r) => {
           const active = r.key === activeKey;
-          const editable = editableRegions && r.key !== "__pending__" && !panMode && !editableBorder;
+          const editable =
+            editableRegions &&
+            r.key !== "__pending__" &&
+            !r.readOnly &&
+            !panMode &&
+            !editableBorder;
           return (
             <div
               key={r.key}

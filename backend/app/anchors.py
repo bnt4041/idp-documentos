@@ -149,33 +149,60 @@ def locate_anchors(
 ) -> dict[str, Any]:
     """Localiza las anclas de `tpl` en `doc`.
 
-    Devuelve {score, n_found, located:[{name, found, text_score, image_score,
-    region, src_center, dst_center, weight}]}. `src_center` está en coords
-    relativas al borde; `dst_center` en coords de imagen del documento (0..1).
+    `src_center` se expresa en PÍXELES de la imagen de muestra de la plantilla y
+    `dst_center` en PÍXELES del documento: así la transformación que los une es la
+    similitud/afín física entre muestra y documento, independiente del borde
+    detectado del documento (que suele ser poco fiable).
+
+    Devuelve {score, n_found, tpl_w, tpl_h, located:[...]}.
     """
     anchors = list(getattr(tpl, "anchors", []) or [])
     if not anchors:
-        return {"score": 0.0, "n_found": 0, "located": []}
+        return {"score": 0.0, "n_found": 0, "tpl_w": None, "tpl_h": None, "located": []}
 
     need_image = any(a.use_image for a in anchors)
     sample_img = None
-    if need_image and getattr(tpl, "sample_document_id", None):
+    tpl_w = tpl_h = None
+    if getattr(tpl, "sample_document_id", None):
         from . import models
 
         sample = db.get(models.Document, tpl.sample_document_id)
-        if sample and os.path.exists(sample.stored_path):
-            sample_img = Image.open(sample.stored_path).convert("RGB")
+        if sample:
+            tpl_w = float(sample.width or 0) or None
+            tpl_h = float(sample.height or 0) or None
+            if need_image and os.path.exists(sample.stored_path):
+                sample_img = Image.open(sample.stored_path).convert("RGB")
+                if not tpl_w or not tpl_h:
+                    tpl_w, tpl_h = float(sample_img.width), float(sample_img.height)
     if need_image and doc_img is None and doc and os.path.exists(doc.stored_path):
         doc_img = Image.open(doc.stored_path).convert("RGB")
 
     words = doc.ocr_words or []
+    # Centros en PÍXELES: src en la imagen de muestra de la plantilla, dst en el
+    # documento. La transformación src->dst es entonces la relación física real
+    # entre ambas (escala+giro+traslación), sin depender del borde del documento.
+    W = float(doc.width or 0) or 1.0
+    H = float(doc.height or 0) or 1.0
+    border = getattr(doc, "border", None) or matching.FULL_BORDER
+    tpl_border = getattr(tpl, "border", None) or matching.FULL_BORDER
+    has_tpl_px = bool(tpl_w and tpl_h)
+
     located: list[dict[str, Any]] = []
     total_w = 0.0
     found_w = 0.0
 
     for a in anchors:
         rel = {"x": a.x, "y": a.y, "w": a.w, "h": a.h}
-        src_center = _center(rel)
+        # src: posición del ancla en PÍXELES de la muestra de la plantilla
+        src_center = None
+        if has_tpl_px:
+            tpl_region = matching.field_to_image(rel, tpl_border)
+            src_center = (
+                (tpl_region["x"] + tpl_region["w"] / 2) * tpl_w,
+                (tpl_region["y"] + tpl_region["h"] / 2) * tpl_h,
+            )
+        # expected: solo para la UI (dónde caería según el borde del documento)
+        expected = matching.field_to_image(rel, border)
         text_score = 0.0
         image_score = 0.0
         dst_center: tuple[float, float] | None = None
@@ -186,7 +213,8 @@ def locate_anchors(
             text_score = tr["score"]
             if tr["found"]:
                 region = tr["region"]
-                dst_center = _center(region)
+                cx, cy = _center(region)
+                dst_center = (cx * W, cy * H)
 
         if a.use_image and sample_img is not None and doc_img is not None:
             ir = find_image_anchor(
@@ -195,7 +223,8 @@ def locate_anchors(
             image_score = ir["score"]
             if ir["found"] and dst_center is None:
                 region = ir["region"]
-                dst_center = _center(region)
+                cx, cy = _center(region)
+                dst_center = (cx * W, cy * H)
 
         found = dst_center is not None
         w = max(0.0, float(a.weight or 1.0))
@@ -209,16 +238,23 @@ def locate_anchors(
                 "found": found,
                 "text_score": round(text_score, 4),
                 "image_score": round(image_score, 4),
-                "region": region,
-                "src_center": src_center,
-                "dst_center": dst_center,
+                "region": region,            # encontrada (normalizada, para la UI)
+                "expected_region": expected,  # esperada (normalizada, para la UI)
+                "src_center": src_center,     # píxeles
+                "dst_center": dst_center,     # píxeles
                 "weight": w,
             }
         )
 
     score = round(found_w / total_w, 4) if total_w else 0.0
     n_found = int(sum(1 for l in located if l["found"]))
-    return {"score": score, "n_found": n_found, "located": located}
+    return {
+        "score": score,
+        "n_found": n_found,
+        "tpl_w": tpl_w,
+        "tpl_h": tpl_h,
+        "located": located,
+    }
 
 
 def public_anchors(located: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -230,6 +266,7 @@ def public_anchors(located: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "text_score": l["text_score"],
             "image_score": l["image_score"],
             "region": l["region"],
+            "expected_region": l["expected_region"],
         }
         for l in located
     ]
@@ -240,7 +277,10 @@ def public_anchors(located: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def estimate_transform(located: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Estima la transformación que mapea coords relativas al borde -> imagen del doc.
+    """Estima la corrección (en PÍXELES) de la posición esperada -> encontrada.
+
+    src = posición esperada del ancla (según el borde), dst = posición encontrada,
+    ambas en píxeles. El resultado corrige proporción, giro fino y desplazamiento.
 
     - 0 anclas encontradas -> None (usar el mapeo de borde habitual).
     - 1 -> solo traslación.
@@ -249,7 +289,7 @@ def estimate_transform(located: list[dict[str, Any]]) -> dict[str, Any] | None:
     pairs = [
         (l["src_center"], l["dst_center"])
         for l in located
-        if l["found"] and l["dst_center"]
+        if l["found"] and l["dst_center"] and l["src_center"]
     ]
     if not pairs:
         return None
@@ -260,7 +300,13 @@ def estimate_transform(located: list[dict[str, Any]]) -> dict[str, Any] | None:
 
     src = np.float32([p[0] for p in pairs])
     dst = np.float32([p[1] for p in pairs])
-    M, _inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC)
+    # >=3 anclas: afín completo (admite escala distinta en X/Y, p.ej. cuando la
+    # muestra y el documento están recortados con proporciones distintas).
+    # 2 anclas: similitud (escala uniforme + giro + traslación).
+    if len(pairs) >= 3:
+        M, _inliers = cv2.estimateAffine2D(src, dst, method=cv2.RANSAC)
+    else:
+        M, _inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC)
     if M is None:
         d = dst.mean(axis=0) - src.mean(axis=0)
         return {"matrix": None, "scale": 1.0, "angle": 0.0, "dx": float(d[0]), "dy": float(d[1])}
@@ -279,26 +325,41 @@ def estimate_transform(located: list[dict[str, Any]]) -> dict[str, Any] | None:
 def apply_transform_to_region(
     region_rel: dict[str, float],
     transform: dict[str, Any] | None,
-    fallback_border: dict[str, float] | None,
+    tpl_border: dict[str, float] | None,
+    tpl_w: float | None,
+    tpl_h: float | None,
+    doc_w: float | None,
+    doc_h: float | None,
 ) -> dict[str, float]:
-    """Mapea una región de campo (relativa al borde) a coords de imagen del doc.
+    """Mapea una región de campo (relativa al borde de la plantilla) al documento.
 
-    Si no hay transform de anclas, cae al mapeo por borde (matching.field_to_image).
+    Convierte el campo a píxeles de la muestra de la plantilla, aplica la
+    transformación de anclas (muestra->documento) y normaliza a coords del doc.
     """
+    tpl_region = matching.field_to_image(region_rel, tpl_border or matching.FULL_BORDER)
     if not transform:
-        return matching.field_to_image(region_rel, fallback_border or matching.FULL_BORDER)
+        # Sin anclas no hay corrección posible aquí; usar el mapeo normalizado tal cual
+        return tpl_region
 
+    TW = float(tpl_w or 0) or 1.0
+    TH = float(tpl_h or 0) or 1.0
+    DW = float(doc_w or 0) or 1.0
+    DH = float(doc_h or 0) or 1.0
     M = transform.get("matrix")
 
-    def map_pt(x: float, y: float) -> tuple[float, float]:
+    def map_pt(xn: float, yn: float) -> tuple[float, float]:
+        # normalizado(plantilla) -> px(plantilla) -> px(doc) -> normalizado(doc)
+        xp, yp = xn * TW, yn * TH
         if M is not None:
-            nx = M[0][0] * x + M[0][1] * y + M[0][2]
-            ny = M[1][0] * x + M[1][1] * y + M[1][2]
-            return nx, ny
-        return x + transform["dx"], y + transform["dy"]
+            nx = M[0][0] * xp + M[0][1] * yp + M[0][2]
+            ny = M[1][0] * xp + M[1][1] * yp + M[1][2]
+        else:
+            nx = xp + transform["dx"]
+            ny = yp + transform["dy"]
+        return nx / DW, ny / DH
 
-    x0, y0 = region_rel["x"], region_rel["y"]
-    x1, y1 = x0 + region_rel["w"], y0 + region_rel["h"]
+    x0, y0 = tpl_region["x"], tpl_region["y"]
+    x1, y1 = x0 + tpl_region["w"], y0 + tpl_region["h"]
     pts = [map_pt(x0, y0), map_pt(x1, y0), map_pt(x1, y1), map_pt(x0, y1)]
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]

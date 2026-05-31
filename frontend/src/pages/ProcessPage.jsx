@@ -590,8 +590,20 @@ function DocumentEditor({ record, onBack }) {
     }
   }
 
+  // Anclas localizadas en el documento (caja encontrada), para verificar el match
+  const anchorRegions = (result?.anchors || [])
+    .filter((a) => a.region)
+    .map((a, i) => ({
+      key: `__anchor_${i}`,
+      name: `⚓ ${a.name}${a.found ? " ✓" : ""}`,
+      className: "anchor",
+      readOnly: true,
+      ...a.region,
+    }));
+
   const regions = [
     ...Object.entries(fields).map(([k, v]) => ({ key: k, name: v.name, ...v.region })),
+    ...anchorRegions,
     ...(pending ? [{ key: "__pending__", name: "Nuevo", ...pending.box }] : []),
   ];
 

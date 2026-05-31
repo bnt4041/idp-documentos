@@ -308,6 +308,16 @@ main {
 .region.anchor .region-label {
   background: #7c3aed;
 }
+/* Ancla "esperada" (según el borde): tenue/punteada para comparar con la encontrada */
+.region.anchor.expected {
+  border-style: dotted;
+  border-color: #c4b5fd;
+  background: rgba(196, 181, 253, 0.08);
+}
+.region.anchor.expected .region-label {
+  background: #c4b5fd;
+  color: #3b0764;
+}
 
 /* Cuadrilátero de perspectiva (4 puntos) */
 .quad-overlay {

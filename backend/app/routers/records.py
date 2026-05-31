@@ -72,18 +72,26 @@ def _apply_anchor_selection(
     return best_tpl, best_combined, best_info
 
 
-def _extract_fields(tpl, doc: models.Document, transform: dict | None) -> dict:
+def _extract_fields(
+    tpl,
+    doc: models.Document,
+    transform: dict | None,
+    tpl_dims: tuple | None = None,
+) -> dict:
     """Extrae los campos del documento. Si hay transformación de anclas, mapea las
-    regiones con ella; si no, usa el mapeo por borde habitual (extract_all)."""
+    regiones con ella (muestra->documento); si no, usa el mapeo por borde habitual."""
     if not tpl:
         return {}
     if not transform:
         return matching.extract_all(tpl, doc.ocr_words, doc.border)
 
+    tpl_w, tpl_h = tpl_dims or (None, None)
     result: dict[str, Any] = {}
     for f in tpl.fields:
         rel = {"x": f.x, "y": f.y, "w": f.w, "h": f.h}
-        region = anchors.apply_transform_to_region(rel, transform, doc.border)
+        region = anchors.apply_transform_to_region(
+            rel, transform, tpl.border, tpl_w, tpl_h, doc.width, doc.height
+        )
         extracted = matching.extract_field(region, doc.ocr_words)
         result[f.key] = {
             "name": f.name,
@@ -148,8 +156,11 @@ def _match_and_extract(
     transform = (
         anchors.estimate_transform(anchor_info["located"]) if anchor_info else None
     )
+    tpl_dims = (
+        (anchor_info.get("tpl_w"), anchor_info.get("tpl_h")) if anchor_info else None
+    )
 
-    fields = _extract_fields(tpl, doc, transform)
+    fields = _extract_fields(tpl, doc, transform, tpl_dims)
 
     # Detección de zona parcial (plantilla más pequeña que el documento). Solo si
     # las anclas no han proporcionado ya una alineación.
