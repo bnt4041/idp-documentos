@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     anchor_max_anisotropy: float = 6.0  # ratio máx escala_x/escala_y (permite recortes muy distintos del mismo form)
     anchor_max_shear: float = 0.2       # cizalla máxima admitida (alta = otro formulario)
 
+    # Re-OCR por región (recorte+ampliación, PSM 6) para campos flojos. Mejora los
+    # valores que el OCR de página completa lee mal. Se aplica tanto en el procesado
+    # interactivo como en el job de segundo plano.
+    region_ocr_refine: bool = True
+    region_ocr_min_conf: float = 80.0   # se re-OCR si el campo está vacío o por debajo de esto
+
     # RAG con LLM local (Ollama)
     ollama_url: str = "http://ollama:11434"
     ollama_model: str = "llama3.2"

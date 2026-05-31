@@ -102,6 +102,44 @@ def _extract_fields(
     return result
 
 
+def _refine_fields_with_region_ocr(doc: models.Document, fields: dict) -> None:
+    """Re-OCR de alta resolución (recorte+ampliación, PSM 6) para campos vacíos o de
+    baja confianza. Mejora los valores que el OCR de página completa lee mal. Modifica
+    `fields` in-place. Lo usan tanto el procesado interactivo como el job de fondo."""
+    if not settings.region_ocr_refine or not fields:
+        return
+    weak = [
+        k
+        for k, v in fields.items()
+        if v.get("region")
+        and (
+            not (v.get("value") or "").strip()
+            or v.get("confidence", 0) < settings.region_ocr_min_conf
+        )
+    ]
+    if not weak or not os.path.exists(doc.stored_path):
+        return
+    try:
+        image = Image.open(doc.stored_path).convert("RGB")
+    except Exception:  # noqa: BLE001
+        return
+    for k in weak:
+        try:
+            res = ocr.ocr_region(image, fields[k]["region"])
+        except Exception:  # noqa: BLE001
+            continue
+        txt = (res.get("text") or "").strip()
+        if not txt:
+            continue
+        old_val = (fields[k].get("value") or "").strip()
+        old_conf = fields[k].get("confidence", 0) or 0
+        new_conf = res.get("confidence", 0) or 0
+        # Sustituye solo si mejora: campo vacío, o el re-OCR no es menos fiable
+        if not old_val or new_conf >= old_conf:
+            fields[k]["value"] = txt
+            fields[k]["confidence"] = new_conf
+
+
 def _match_and_extract(
     db: Session,
     doc: models.Document,
@@ -198,6 +236,10 @@ def _match_and_extract(
                                 fdata["n_words"] = extracted["n_words"]
         except Exception:  # noqa: BLE001
             zone = None
+
+    # Re-OCR de alta resolución de los campos flojos (mismo OCR del botón ↻).
+    # Aplica al procesado interactivo y al job de fondo (ambos pasan por aquí).
+    _refine_fields_with_region_ocr(doc, fields)
 
     return {
         "template": tpl,
