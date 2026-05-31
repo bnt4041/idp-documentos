@@ -257,16 +257,24 @@ def locate_anchors(
     }
 
 
+def _clean_region(region: dict | None) -> dict | None:
+    """Convierte los valores de una región a float de Python (ORB devuelve numpy
+    float32, que Pydantic no sabe serializar)."""
+    if not region:
+        return None
+    return {k: float(v) for k, v in region.items()}
+
+
 def public_anchors(located: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Versión serializable (sin tuplas internas) para el MatchResult/UI."""
+    """Versión serializable (sin tuplas internas ni numpy) para el MatchResult/UI."""
     return [
         {
             "name": l["name"],
-            "found": l["found"],
-            "text_score": l["text_score"],
-            "image_score": l["image_score"],
-            "region": l["region"],
-            "expected_region": l["expected_region"],
+            "found": bool(l["found"]),
+            "text_score": float(l["text_score"]),
+            "image_score": float(l["image_score"]),
+            "region": _clean_region(l["region"]),
+            "expected_region": _clean_region(l["expected_region"]),
         }
         for l in located
     ]
@@ -276,15 +284,39 @@ def public_anchors(located: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # Transformación de alineación (src relativo-al-borde -> dst imagen del doc)
 # ---------------------------------------------------------------------------
 
+def _reproj_error(M, src, dst) -> float:
+    """Error de reproyección RMS relativo a la extensión de los puntos dst."""
+    proj = (M @ np.hstack([src, np.ones((len(src), 1), np.float32)]).T).T
+    rms = float(np.sqrt(np.mean(np.sum((proj - dst) ** 2, axis=1))))
+    extent = float(np.linalg.norm(dst.max(axis=0) - dst.min(axis=0))) or 1.0
+    return rms / extent
+
+
+def _affine_params(M) -> dict[str, float] | None:
+    """Descompone una afín 2x3 en escala X/Y, cizalla y giro."""
+    a, b = float(M[0, 0]), float(M[0, 1])
+    c, d = float(M[1, 0]), float(M[1, 1])
+    sx = math.hypot(a, c)
+    if sx < 1e-9:
+        return None
+    det = a * d - b * c
+    sy = det / sx
+    shear = (a * b + c * d) / (sx * sx)
+    angle = math.degrees(math.atan2(c, a))
+    return {"sx": sx, "sy": sy, "shear": shear, "angle": angle}
+
+
 def estimate_transform(located: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Estima la corrección (en PÍXELES) de la posición esperada -> encontrada.
+    """Estima la transformación PÍXELES muestra-plantilla -> PÍXELES documento.
 
-    src = posición esperada del ancla (según el borde), dst = posición encontrada,
-    ambas en píxeles. El resultado corrige proporción, giro fino y desplazamiento.
-
-    - 0 anclas encontradas -> None (usar el mapeo de borde habitual).
-    - 1 -> solo traslación.
-    - >=2 -> similitud (escala + rotación + traslación) con estimateAffinePartial2D.
+    Estrategia para distinguir "mismo formulario" de "formulario distinto":
+      - 1 ancla  -> solo traslación.
+      - >=3      -> afín completa (admite recortes/proporciones distintas del MISMO
+                    formulario), pero solo se acepta si es geométricamente sensata
+                    (escala/anisotropía/cizalla acotadas). Si la afín está muy
+                    distorsionada = formulario distinto -> no se usa.
+      - si la afín no vale -> similitud rígida (escala uniforme + giro), validada
+        por error de reproyección. Si tampoco encaja -> None (no se distorsiona).
     """
     pairs = [
         (l["src_center"], l["dst_center"])
@@ -296,29 +328,65 @@ def estimate_transform(located: list[dict[str, Any]]) -> dict[str, Any] | None:
 
     if len(pairs) == 1:
         (sx, sy), (dx, dy) = pairs[0]
-        return {"matrix": None, "scale": 1.0, "angle": 0.0, "dx": dx - sx, "dy": dy - sy}
+        return {"matrix": None, "scale": 1.0, "angle": 0.0, "dx": dx - sx, "dy": dy - sy,
+                "residual": 0.0, "n": 1, "kind": "translation"}
 
     src = np.float32([p[0] for p in pairs])
     dst = np.float32([p[1] for p in pairs])
-    # >=3 anclas: afín completo (admite escala distinta en X/Y, p.ej. cuando la
-    # muestra y el documento están recortados con proporciones distintas).
-    # 2 anclas: similitud (escala uniforme + giro + traslación).
-    if len(pairs) >= 3:
-        M, _inliers = cv2.estimateAffine2D(src, dst, method=cv2.RANSAC)
-    else:
-        M, _inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC)
-    if M is None:
-        d = dst.mean(axis=0) - src.mean(axis=0)
-        return {"matrix": None, "scale": 1.0, "angle": 0.0, "dx": float(d[0]), "dy": float(d[1])}
+    n = len(pairs)
 
-    scale = float(math.hypot(M[0, 0], M[1, 0]))
-    angle = float(math.degrees(math.atan2(M[1, 0], M[0, 0])))
+    # 1) Afín completa (>=3 anclas): tolera diferencias de recorte/aspecto del mismo
+    #    formulario, pero la rechazamos si está muy distorsionada (cizalla = otro form).
+    if n >= 3:
+        Ma, _ = cv2.estimateAffine2D(src, dst, method=cv2.RANSAC)
+        if Ma is not None:
+            p = _affine_params(Ma)
+            if p:
+                asx, asy = abs(p["sx"]), abs(p["sy"])
+                aniso = max(asx, asy) / max(1e-9, min(asx, asy))
+                resid = _reproj_error(Ma, src, dst)
+                # Se permite mucha anisotropía (mismo formulario recortado distinto),
+                # pero NO reflexión (sy<0) ni cizalla alta (eso = otro formulario).
+                sane = (
+                    p["sy"] > 0
+                    and 0.1 <= asx <= 6.0
+                    and 0.1 <= asy <= 6.0
+                    and aniso <= settings.anchor_max_anisotropy
+                    and abs(p["shear"]) <= settings.anchor_max_shear
+                    and (n < 4 or resid <= settings.anchor_fit_max_error)
+                )
+                if sane:
+                    return {
+                        "matrix": Ma.tolist(),
+                        "scale": round((asx + asy) / 2, 5),
+                        "angle": round(p["angle"], 3),
+                        "dx": float(Ma[0, 2]),
+                        "dy": float(Ma[1, 2]),
+                        "residual": round(resid, 4),
+                        "n": n,
+                        "kind": "affine",
+                    }
+
+    # 2) Similitud rígida (2+ anclas), validada por error y escala
+    Ms, _ = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC)
+    if Ms is None:
+        return None
+    resid = _reproj_error(Ms, src, dst)
+    scale = float(math.hypot(Ms[0, 0], Ms[1, 0]))
+    angle = float(math.degrees(math.atan2(Ms[1, 0], Ms[0, 0])))
+    if not (0.25 <= scale <= 4.0):
+        return None
+    if n >= 3 and resid > settings.anchor_fit_max_error:
+        return None
     return {
-        "matrix": M.tolist(),
+        "matrix": Ms.tolist(),
         "scale": round(scale, 5),
         "angle": round(angle, 3),
-        "dx": float(M[0, 2]),
-        "dy": float(M[1, 2]),
+        "dx": float(Ms[0, 2]),
+        "dy": float(Ms[1, 2]),
+        "residual": round(resid, 4),
+        "n": n,
+        "kind": "similarity",
     }
 
 

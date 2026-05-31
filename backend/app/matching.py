@@ -128,9 +128,12 @@ def extract_field(
     posición (línea, luego columna) y se concatenan.
     """
     fx, fy, fw, fh = field["x"], field["y"], field["w"], field["h"]
-    # Pequeño margen para tolerar variaciones de alineación entre documentos
-    pad_x = fw * 0.10
-    pad_y = fh * 0.20
+    # Margen para tolerar variaciones de alineación entre documentos. Se aplica un
+    # mínimo absoluto para que cajas muy finas (campos de una línea, o regiones muy
+    # comprimidas por la alineación de anclas) capturen igualmente su línea de texto
+    # sin invadir las filas contiguas.
+    pad_x = max(fw * 0.10, 0.004)
+    pad_y = max(fh * 0.20, 0.006)
     x0, y0 = fx - pad_x, fy - pad_y
     x1, y1 = fx + fw + pad_x, fy + fh + pad_y
 

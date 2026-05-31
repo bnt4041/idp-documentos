@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     anchor_match_weight: float = 0.5    # peso de las anclas en el score combinado (si existen)
     anchor_text_threshold: float = 0.7  # umbral SequenceMatcher para dar texto por casado
     anchor_image_threshold: float = 0.3  # umbral de detect_best_zone para el patch
+    # Error de reproyección relativo máximo (0..1) al ajustar la similitud por anclas.
+    # Si se supera (3+ anclas que no encajan = formulario distinto), no se aplica la
+    # transformación para no distorsionar las coordenadas de los campos.
+    anchor_fit_max_error: float = 0.15
+    # Límites de "cordura" de la afín por anclas: si los supera, la forma es
+    # demasiado distinta (otro formulario) y se descarta la afín.
+    anchor_max_anisotropy: float = 6.0  # ratio máx escala_x/escala_y (permite recortes muy distintos del mismo form)
+    anchor_max_shear: float = 0.2       # cizalla máxima admitida (alta = otro formulario)
 
     # RAG con LLM local (Ollama)
     ollama_url: str = "http://ollama:11434"
