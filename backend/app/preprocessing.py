@@ -571,14 +571,16 @@ def detect_zones_orb(
         "matches": len(good),
         "inliers": inliers,
         "homography": H.tolist(),
+        # float() explícito: x0..y1 vienen de numpy (np.float32) y romperían la
+        # serialización JSON/Pydantic aguas abajo.
         "region": {
-            "x": round(x0 / dw, 5),
-            "y": round(y0 / dh, 5),
-            "w": round((x1 - x0) / dw, 5),
-            "h": round((y1 - y0) / dh, 5),
+            "x": round(float(x0) / dw, 5),
+            "y": round(float(y0) / dh, 5),
+            "w": round(float(x1 - x0) / dw, 5),
+            "h": round(float(y1 - y0) / dh, 5),
         },
         "corners": [
-            {"x": round(p[0] / dw, 5), "y": round(p[1] / dh, 5)}
+            {"x": round(float(p[0]) / dw, 5), "y": round(float(p[1]) / dh, 5)}
             for p in projected
         ],
     }
