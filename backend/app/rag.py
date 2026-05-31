@@ -191,14 +191,18 @@ def learn_from_record(db, template, document, regions: dict[str, dict], values: 
             "h": round(r["h"] / bh, 5),
         }
 
-    # 1) Actualiza/crea campos de la plantilla con las posiciones afinadas
+    # 1) Guarda el ejemplo y actualiza el diccionario (sample_text). IMPORTANTE:
+    #    NO se sobrescribe la geometría (x/y/w/h) de los campos ya existentes en la
+    #    plantilla: esas regiones llegan en coords del DOCUMENTO (alineadas por
+    #    anclas a su geometría concreta) y reescribirlas haría DERIVAR la plantilla
+    #    en cada confirmación. La geometría de la plantilla solo se edita a mano en
+    #    el editor de plantillas. Los campos NUEVOS sí se crean (no había geometría).
     existing = {f.key: f for f in template.fields}
     example_fields: dict[str, Any] = {}
     for key, region in (regions or {}).items():
         rel = to_rel(region)
         if key in existing:
             f = existing[key]
-            f.x, f.y, f.w, f.h = rel["x"], rel["y"], rel["w"], rel["h"]
             if values.get(key):
                 f.sample_text = str(values[key])
         else:

@@ -334,6 +334,7 @@ def estimate_transform(located: list[dict[str, Any]]) -> dict[str, Any] | None:
     src = np.float32([p[0] for p in pairs])
     dst = np.float32([p[1] for p in pairs])
     n = len(pairs)
+    cv2.setRNGSeed(0)  # RANSAC determinista: mismos puntos -> misma transformación
 
     # 1) Afín completa (>=3 anclas): tolera diferencias de recorte/aspecto del mismo
     #    formulario, pero la rechazamos si está muy distorsionada (cizalla = otro form).

@@ -549,6 +549,7 @@ def detect_zones_orb(
     src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
 
+    cv2.setRNGSeed(0)  # RANSAC determinista: misma imagen -> misma homografía
     H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
     if H is None:
         return {"found": False, "matches": len(good), "homography": None, "region": None}
