@@ -139,6 +139,24 @@ curl -X POST http://localhost:8088/api/records \
 - **Extracción**: para cada campo se recogen las palabras cuyo centro cae en su región
   (con un pequeño margen), se ordenan en orden de lectura y se concatenan.
 
+## Anclas (hitos) y rectificación a la plantilla
+
+Además de la firma geométrica, una plantilla puede definir **anclas**: zonas fijas de
+referencia (texto fijo y/o trozo de imagen) que permiten **enderezar la imagen del
+documento al marco de la plantilla** (girar, corregir inclinación, escalar) y luego extraer
+los campos por proporcionalidad simple. Al procesar:
+
+- se localizan las anclas (multi-ángulo × multi-filtro),
+- se **rectifica la imagen** con una similitud rígida ORB (sin cizalla; corrige giros de
+  90/180/270 automáticamente),
+- el documento queda alineado a la plantilla → borde = `tpl.border`, campos proporcionales,
+- si faltan anclas **obligatorias**, el documento no se toca y queda en `review`.
+
+El editor de revisión muestra una **traza** del pipeline (giro/enderezado/escala) y un modal
+**⚓ Ver anclas** que compara cada ancla (plantilla vs detectada).
+
+📄 **Documentación completa**: [docs/anclas-y-rectificacion.md](docs/anclas-y-rectificacion.md)
+
 ## Configuración (`.env`)
 
 | Variable            | Por defecto | Descripción                          |
@@ -152,6 +170,9 @@ Para añadir más idiomas, instala el paquete `tesseract-ocr-<lang>` en
 ## Notas / siguientes pasos
 
 - El esquema de BD se crea con `create_all` (MVP). Para producción, añadir **Alembic**.
+  `create_all` **no altera** tablas existentes: tras añadir la columna `required` a las
+  anclas, en una BD ya creada hay que ejecutar
+  `ALTER TABLE template_anchors ADD COLUMN IF NOT EXISTS required BOOLEAN NOT NULL DEFAULT false;`
 - El matching es geométrico; para documentos muy variables se puede mejorar con anclas
   de texto o, si más adelante quieres, un motor híbrido con un modelo de visión.
 - Multipágina: actualmente se procesa la **primera página** de cada PDF.

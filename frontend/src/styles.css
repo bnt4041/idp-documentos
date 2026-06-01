@@ -728,8 +728,8 @@ hr {
 /* Procesado */
 .match-info {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 .badge {
   font-size: 0.78rem;

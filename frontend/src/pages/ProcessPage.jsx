@@ -935,6 +935,7 @@ function DocumentEditor({ record, onBack }) {
       {anchorModal && result && (
         <AnchorFootprintModal
           anchors={result.anchors || []}
+          aligned={result.aligned}
           docImageUrl={`${api.documentImageUrl(documentId)}?v=${imgRev}`}
           sampleImageUrl={
             result.sample_document_id
@@ -950,7 +951,7 @@ function DocumentEditor({ record, onBack }) {
 
 // Modal de huella de anclas: recorta al vuelo cada ancla de la muestra (esperada)
 // y del documento (detectada) usando las coordenadas normalizadas.
-function AnchorFootprintModal({ anchors, docImageUrl, sampleImageUrl, onClose }) {
+function AnchorFootprintModal({ anchors, aligned, docImageUrl, sampleImageUrl, onClose }) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal anchor-modal" onClick={(e) => e.stopPropagation()}>
@@ -984,7 +985,13 @@ function AnchorFootprintModal({ anchors, docImageUrl, sampleImageUrl, onClose })
                   <figcaption>Plantilla</figcaption>
                 </figure>
                 <figure>
-                  <CropView imageUrl={docImageUrl} box={a.region} />
+                  {/* Si el documento está rectificado a la plantilla, la zona del
+                      ancla está en su posición de plantilla (expected_region); si
+                      no, en la caja que ORB localizó (region). */}
+                  <CropView
+                    imageUrl={docImageUrl}
+                    box={aligned ? a.expected_region : a.region}
+                  />
                   <figcaption>Detectada</figcaption>
                 </figure>
               </div>
