@@ -72,6 +72,7 @@ class AnchorIn(BaseModel):
     anchor_text: str = ""
     use_text: bool = True
     use_image: bool = True
+    required: bool = False
     weight: float = 1.0
 
 
@@ -127,6 +128,13 @@ class MatchResult(BaseModel):
     # Anclas localizadas: [{name, found, text_score, image_score, region}]
     anchors: list[dict] | None = None
     anchor_score: float = 0.0
+    # True si faltan anclas obligatorias / no se pudo rectificar -> revisión manual
+    needs_review: bool = False
+    aligned: bool = False  # True si el documento se rectificó a la plantilla
+    # Traza legible de lo que hizo el pipeline (giro, escala, alineado…)
+    pipeline: list[str] = []
+    # Id del documento de muestra de la plantilla (para el modal de huella de anclas)
+    sample_document_id: int | None = None
     fields: dict
     width: int
     height: int

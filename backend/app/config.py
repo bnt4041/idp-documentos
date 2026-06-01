@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     # demasiado distinta (otro formulario) y se descarta la afín.
     anchor_max_anisotropy: float = 6.0  # ratio máx escala_x/escala_y (permite recortes muy distintos del mismo form)
     anchor_max_shear: float = 0.2       # cizalla máxima admitida (alta = otro formulario)
+    # Filtros (en cascada) para localizar anclas de imagen difíciles (B/N, bajo contraste)
+    anchor_filters: list[str] = ["grayscale", "binary", "clahe"]
 
     # Re-OCR por región (recorte+ampliación, PSM 6) para campos flojos. Mejora los
     # valores que el OCR de página completa lee mal. Se aplica tanto en el procesado

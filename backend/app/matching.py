@@ -128,12 +128,12 @@ def extract_field(
     posición (línea, luego columna) y se concatenan.
     """
     fx, fy, fw, fh = field["x"], field["y"], field["w"], field["h"]
-    # Margen para tolerar variaciones de alineación entre documentos. Se aplica un
-    # mínimo absoluto para que cajas muy finas (campos de una línea, o regiones muy
-    # comprimidas por la alineación de anclas) capturen igualmente su línea de texto
-    # sin invadir las filas contiguas.
-    pad_x = max(fw * 0.10, 0.004)
-    pad_y = max(fh * 0.20, 0.006)
+    # Margen para tolerar variaciones de alineación entre documentos. El mínimo
+    # absoluto es generoso porque la rectificación por anclas/ORB deja un residual
+    # de alineación (~0.02-0.04 normalizado). Sin esto, una caja fina no captura su
+    # línea cuando el documento queda mínimamente desplazado respecto a la plantilla.
+    pad_x = max(fw * 0.08, 0.006)
+    pad_y = max(fh * 0.15, 0.010)
     x0, y0 = fx - pad_x, fy - pad_y
     x1, y1 = fx + fw + pad_x, fy + fh + pad_y
 
@@ -149,7 +149,27 @@ def extract_field(
     confidence = (
         round(sum(h["conf"] for h in hits) / len(hits), 1) if hits else 0.0
     )
-    return {"value": value, "confidence": confidence, "n_words": len(hits)}
+    # Bounding box real de las palabras capturadas: permite que la caja en la UI se
+    # ajuste al TEXTO extraído (clava sobre el contenido) en lugar de a la posición
+    # teórica de la plantilla, tolerando el pequeño residual de alineación.
+    matched_box = None
+    if hits:
+        bx0 = min(h["box"]["x"] for h in hits)
+        by0 = min(h["box"]["y"] for h in hits)
+        bx1 = max(h["box"]["x"] + h["box"]["w"] for h in hits)
+        by1 = max(h["box"]["y"] + h["box"]["h"] for h in hits)
+        matched_box = {
+            "x": round(bx0, 5),
+            "y": round(by0, 5),
+            "w": round(bx1 - bx0, 5),
+            "h": round(by1 - by0, 5),
+        }
+    return {
+        "value": value,
+        "confidence": confidence,
+        "n_words": len(hits),
+        "matched_box": matched_box,
+    }
 
 
 FULL_BORDER = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}

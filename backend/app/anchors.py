@@ -105,8 +105,12 @@ def find_image_anchor(
 ) -> dict[str, Any]:
     """Recorta el patch del ancla de la muestra y lo localiza en el documento.
 
-    Reutiliza preprocessing.detect_best_zone (ORB multiescala + template matching
-    multiángulo), tolerante a escala, giro y filtros B/N.
+    Usa ORB directo (invariante a rotación y escala): la región devuelta queda
+    SIEMPRE en el marco ORIGINAL del documento, de modo que la disposición de las
+    anclas codifica correctamente el giro del documento (para el auto-enderezado).
+    Si ORB no encuentra suficientes puntos, recurre a template matching multiescala
+    (sin rotación). NO se usa detect_best_zone porque rota el documento por dentro y
+    devolvería coordenadas en un marco rotado.
     """
     img_region = matching.field_to_image(anchor_rel, tpl_border or matching.FULL_BORDER)
     sw, sh = sample_img.size
@@ -123,18 +127,80 @@ def find_image_anchor(
     if patch.width < 12 or patch.height < 12:
         return {"found": False, "score": 0.0, "region": None}
 
-    try:
-        res = preprocessing.detect_best_zone(doc_img, patch)
-    except Exception:  # noqa: BLE001
-        return {"found": False, "score": 0.0, "region": None}
+    # Tamaño esperado del parche en proporción del documento (referencia para
+    # validar que la región localizada es coherente y no una homografía degenerada).
+    exp_w = img_region["w"]
+    exp_h = img_region["h"]
 
-    score = float(res.get("score", 0.0) or 0.0)
-    found = bool(res.get("found")) and score >= threshold and res.get("region")
-    return {
-        "found": bool(found),
-        "score": round(score, 4),
-        "region": res.get("region") if found else None,
-    }
+    def _accept(reg: dict | None) -> dict | None:
+        """Valida la región ORB/TM y la normaliza al TAMAÑO ESPERADO del parche,
+        centrada en la posición encontrada.
+
+        El bounding box que devuelve ORB es inestable entre documentos distintos
+        (homografías que se estiran), pero su CENTRO sí es fiable y es lo único que
+        usa la transformación de alineación. Reconstruir la caja con el tamaño
+        esperado evita zonas deformadas en la UI sin afectar al centro.
+        """
+        if not reg:
+            return None
+        rw, rh = reg.get("w", 0), reg.get("h", 0)
+        if rw <= 0 or rh <= 0:
+            return None
+        # Descartar homografías claramente degeneradas (caja gigantesca)
+        if rw * rh > 0.12:
+            return None
+        if exp_w > 0 and rw > exp_w * 4.0 + 0.05:
+            return None
+        if exp_h > 0 and rh > exp_h * 4.0 + 0.05:
+            return None
+        cx = reg["x"] + rw / 2
+        cy = reg["y"] + rh / 2
+        w = exp_w or rw
+        h = exp_h or rh
+        return {
+            "x": round(max(0.0, cx - w / 2), 5),
+            "y": round(max(0.0, cy - h / 2), 5),
+            "w": round(w, 5),
+            "h": round(h, 5),
+        }
+
+    # 1) ORB en el marco original (invariante a rotación/escala)
+    try:
+        orb = preprocessing.detect_zones_orb(doc_img, patch, min_matches=8)
+    except Exception:  # noqa: BLE001
+        orb = {"found": False}
+    if orb.get("found"):
+        norm = _accept(orb.get("region"))
+        if norm:
+            inliers = orb.get("inliers", 0)
+            matches = orb.get("matches", 1)
+            score = min(1.0, (inliers / max(1, matches)) / 0.5)
+            if score >= threshold:
+                return {"found": True, "score": round(float(score), 4), "region": norm}
+
+    # 2) Fallback: template matching multiescala (sin rotación)
+    try:
+        tm = preprocessing.detect_template_zones_multiscale(doc_img, patch, threshold=threshold)
+    except Exception:  # noqa: BLE001
+        tm = {"found": False}
+    if tm.get("found"):
+        norm = _accept(tm.get("region"))
+        if norm:
+            return {"found": True, "score": round(float(tm.get("score", 0.0)), 4), "region": norm}
+
+    return {"found": False, "score": 0.0, "region": None}
+
+
+def _sample_image(db, tpl) -> Image.Image | None:
+    """Imagen de muestra de la plantilla (PIL RGB) o None si no existe."""
+    if not getattr(tpl, "sample_document_id", None):
+        return None
+    from . import models
+
+    sample = db.get(models.Document, tpl.sample_document_id)
+    if sample and os.path.exists(sample.stored_path):
+        return Image.open(sample.stored_path).convert("RGB")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +344,425 @@ def public_anchors(located: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for l in located
     ]
+
+
+# ---------------------------------------------------------------------------
+# Localización robusta (multi-ángulo × multi-filtro) + rectificación a plantilla
+# ---------------------------------------------------------------------------
+
+def _filtered(image: Image.Image, name: str) -> Image.Image:
+    """Aplica un filtro por nombre reutilizando preprocessing. Devuelve PIL."""
+    fn = preprocessing.FILTERS.get(name)
+    if not fn:
+        return image
+    try:
+        out = fn(image)
+        return out if out.mode == "RGB" else out.convert("RGB")
+    except Exception:  # noqa: BLE001
+        return image
+
+
+def _locate_in_image(
+    image: Image.Image,
+    words: list[dict[str, Any]],
+    anchors_list: list,
+    sample_img: Image.Image | None,
+    tpl,
+    tpl_w: float,
+    tpl_h: float,
+) -> dict[str, Any]:
+    """Localiza todas las anclas en una imagen YA orientada.
+
+    Texto: sobre `words` (OCR de esta imagen). Imagen: ORB del patch, probando en
+    cascada los filtros de settings.anchor_filters hasta encontrarla.
+    Devuelve {located:[{name, found, src_center, dst_center(px de ESTA imagen), ...}],
+    score, n_found}. src_center en píxeles de la MUESTRA.
+    """
+    W, H = float(image.width), float(image.height)
+    tpl_border = getattr(tpl, "border", None) or matching.FULL_BORDER
+    # Variantes filtradas de la imagen del documento (perezosas)
+    doc_variants: dict[str, Image.Image] = {}
+
+    def doc_variant(name: str) -> Image.Image:
+        if name not in doc_variants:
+            doc_variants[name] = _filtered(image, name) if name != "grayscale" else image
+        return doc_variants[name]
+
+    located: list[dict[str, Any]] = []
+    total_w = found_w = 0.0
+    for a in anchors_list:
+        rel = {"x": a.x, "y": a.y, "w": a.w, "h": a.h}
+        src_center = None
+        if tpl_w and tpl_h:
+            tr = matching.field_to_image(rel, tpl_border)
+            src_center = (
+                (tr["x"] + tr["w"] / 2) * tpl_w,
+                (tr["y"] + tr["h"] / 2) * tpl_h,
+            )
+        text_score = image_score = 0.0
+        dst_center = None
+        region = None
+
+        if a.use_text and a.anchor_text:
+            res = find_text_anchor(a.anchor_text, words, settings.anchor_text_threshold)
+            text_score = res["score"]
+            if res["found"]:
+                region = res["region"]
+                cx, cy = _center(region)
+                dst_center = (cx * W, cy * H)
+
+        if dst_center is None and a.use_image and sample_img is not None:
+            for flt in settings.anchor_filters:
+                dv = doc_variant(flt)
+                sv = sample_img if flt == "grayscale" else _filtered(sample_img, flt)
+                res = find_image_anchor(
+                    dv, sv, rel, tpl.border, settings.anchor_image_threshold
+                )
+                if res["score"] > image_score:
+                    image_score = res["score"]
+                if res["found"]:
+                    region = res["region"]
+                    cx, cy = _center(region)
+                    dst_center = (cx * W, cy * H)
+                    break
+
+        found = dst_center is not None
+        w = max(0.0, float(a.weight or 1.0))
+        total_w += w
+        if found:
+            found_w += w
+        located.append(
+            {
+                "name": a.name,
+                "required": bool(getattr(a, "required", False)),
+                "found": found,
+                "text_score": round(text_score, 4),
+                "image_score": round(image_score, 4),
+                "region": region,
+                "expected_region": matching.field_to_image(rel, tpl_border),
+                "src_center": src_center,
+                "dst_center": dst_center,
+                "weight": w,
+            }
+        )
+
+    return {
+        "located": located,
+        "score": round(found_w / total_w, 4) if total_w else 0.0,
+        "n_found": int(sum(1 for l in located if l["found"])),
+    }
+
+
+def locate_anchors_robust(db, doc, tpl, image: Image.Image) -> dict[str, Any]:
+    """Localiza las anclas probando las 4 orientaciones (0/90/180/270) y multi-filtro.
+
+    Devuelve {angle, image (PIL en el mejor ángulo), located, score, n_found, tpl_w,
+    tpl_h, sample_size}. El `angle` es el giro que se aplicó a la imagen original para
+    llegar a la orientación ganadora (para poder persistir esa rotación).
+    """
+    anchors_list = list(getattr(tpl, "anchors", []) or [])
+    sample_img = _sample_image(db, tpl)
+    tpl_w = tpl_h = None
+    if getattr(tpl, "sample_document_id", None):
+        from . import models
+
+        s = db.get(models.Document, tpl.sample_document_id)
+        if s:
+            tpl_w = float(s.width or 0) or (float(sample_img.width) if sample_img else None)
+            tpl_h = float(s.height or 0) or (float(sample_img.height) if sample_img else None)
+
+    need_text = any(a.use_text and a.anchor_text for a in anchors_list)
+
+    # Fijar la orientación con la señal robusta de página-completa (aspect ratio +
+    # ORB global + OSD), no por parches pequeños (que casan a cualquier giro).
+    angles = [0, 90, 180, 270]
+    if sample_img is not None:
+        try:
+            pref, _inl = preprocessing.best_rotation_by_orb(image, sample_img)
+            pref %= 360
+            # Probar primero el ángulo preferido y su opuesto (desambiguación 180)
+            angles = [pref, (pref + 180) % 360, (pref + 90) % 360, (pref + 270) % 360]
+        except Exception:  # noqa: BLE001
+            pass
+
+    sample_size = (int(tpl_w), int(tpl_h)) if (tpl_w and tpl_h) else None
+    best = None
+    best_rank = (-1, -1.0, -1.0)  # (n_found, rectificable, score)
+    for angle in angles:
+        rot = image if angle == 0 else image.rotate(-angle, expand=True)
+        words = []
+        if need_text:
+            try:
+                words = ocr.run_ocr(rot)
+            except Exception:  # noqa: BLE001
+                words = []
+        res = _locate_in_image(rot, words, anchors_list, sample_img, tpl, tpl_w or 0, tpl_h or 0)
+        res["angle"] = angle
+        res["image"] = rot
+        res["words"] = words
+        _r, rect_ok = rectify_to_template(res["located"], rot, sample_size, sample_img)
+        rank = (res["n_found"], 1.0 if rect_ok else 0.0, res["score"])
+        if rank > best_rank:
+            best_rank = rank
+            best = res
+        if rect_ok and res["n_found"] == len(anchors_list) and res["n_found"] > 0:
+            break
+
+    if best is None:
+        best = {"angle": 0, "image": image, "words": [], "located": [], "score": 0.0, "n_found": 0}
+
+    best["tpl_w"] = tpl_w
+    best["tpl_h"] = tpl_h
+    best["sample_size"] = (int(tpl_w), int(tpl_h)) if (tpl_w and tpl_h) else None
+    best["sample_img"] = sample_img
+    return best
+
+
+def required_ok(located: list[dict[str, Any]]) -> bool:
+    """True si todas las anclas marcadas como obligatorias se han localizado."""
+    req = [l for l in located if l.get("required")]
+    return all(l["found"] for l in req) if req else True
+
+
+def rectify_with_homography(
+    image: Image.Image,
+    sample_img: Image.Image,
+    sample_size: tuple[int, int] | None,
+    info: dict | None = None,
+) -> tuple[Image.Image | None, bool]:
+    """Rectifica la PÁGINA COMPLETA del documento al marco de la muestra mediante una
+    transformación RÍGIDA (rotación + escala uniforme + traslación) estimada a partir
+    de los keypoints ORB de toda la página.
+
+    Se usa una SIMILITUD (no homografía completa): un permiso es una hoja plana, así
+    que no hay perspectiva real. La homografía de 8 dof introduce cizalla/perspectiva
+    falsa entre documentos distintos (líneas de tabla en diagonal). La similitud no
+    puede deformar: solo gira, escala y traslada.
+
+    Si se pasa `info` (dict), se rellena con la traza: angle, scale, inliers, ecc.
+    """
+    if not sample_size:
+        return None, False
+
+    doc_arr = preprocessing.pil_to_cv2(image)
+    tpl_arr = preprocessing.pil_to_cv2(sample_img)
+    doc_gray = cv2.cvtColor(doc_arr, cv2.COLOR_BGR2GRAY)
+    tpl_gray = cv2.cvtColor(tpl_arr, cv2.COLOR_BGR2GRAY)
+
+    # ORB casa mucho mejor cuando documento y muestra tienen tamaño similar. Si
+    # difieren mucho (p.ej. muestra DNI 532px vs escaneo 2339px), pre-escalamos el
+    # documento al tamaño de la muestra y luego componemos la escala en la matriz.
+    sw, sh = sample_img.size
+    dw, dh = image.size
+    pre = 1.0
+    long_doc = max(dw, dh)
+    long_tpl = max(sw, sh)
+    if long_tpl and abs(long_doc / long_tpl - 1.0) > 0.5:
+        pre = long_tpl / long_doc
+        doc_small = cv2.resize(doc_gray, (max(1, int(dw * pre)), max(1, int(dh * pre))))
+    else:
+        doc_small = doc_gray
+
+    try:
+        orb = cv2.ORB_create(nfeatures=3000)
+        kp1, des1 = orb.detectAndCompute(doc_small, None)  # documento (pre-escalado)
+        kp2, des2 = orb.detectAndCompute(tpl_gray, None)   # muestra
+        if des1 is None or des2 is None or len(kp1) < 10 or len(kp2) < 10:
+            return None, False
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        matches = sorted(bf.match(des1, des2), key=lambda m: m.distance)
+        good = matches[:200]
+        if len(good) < 12:
+            return None, False
+        # Puntos del documento en coords ORIGINALES (deshacer el pre-escalado)
+        src = np.float32([[kp1[m.queryIdx].pt[0] / pre, kp1[m.queryIdx].pt[1] / pre] for m in good])
+        dst = np.float32([kp2[m.trainIdx].pt for m in good])  # muestra
+        # Similitud documento->muestra (rotación+escala uniforme+traslación)
+        M, mask = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+    except Exception:  # noqa: BLE001
+        return None, False
+    if M is None:
+        return None, False
+
+    # Cordura de la escala (evita transformaciones degeneradas)
+    scale = float(math.hypot(M[0, 0], M[1, 0]))
+    if not (0.2 <= scale <= 5.0):
+        return None, False
+    inliers = int(mask.sum()) if mask is not None else 0
+    if inliers < 10:
+        return None, False
+
+    # Traza del enderezamiento (ángulo en sentido horario del documento original)
+    rot_angle = float(math.degrees(math.atan2(M[1, 0], M[0, 0])))
+    if info is not None:
+        info["scale"] = round(scale, 4)
+        info["rotation"] = round(rot_angle, 2)
+        info["inliers"] = inliers
+
+    warped = cv2.warpAffine(
+        doc_arr, M, sample_size,
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255),
+    )
+
+    # Refinamiento por ECC (Enhanced Correlation Coefficient): alinea por intensidad
+    # el documento ya warpeado con la muestra, corrigiendo el pequeño residual de
+    # rotación+traslación+escala que deja la similitud ORB global. Dos permisos del
+    # mismo modelo comparten la rejilla de la tabla, así que ECC converge bien.
+    try:
+        wg = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        sg = tpl_gray.astype(np.float32) / 255.0
+        if wg.shape == sg.shape:
+            warp_matrix = np.eye(2, 3, dtype=np.float32)
+            criteria = (
+                cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-5,
+            )
+            # MOTION_EUCLIDEAN = rotación + traslación (sin cizalla/escala -> no deforma)
+            cc, warp_matrix = cv2.findTransformECC(
+                sg, wg, warp_matrix, cv2.MOTION_EUCLIDEAN, criteria, None, 5,
+            )
+            # Solo aplicar si la corrección es pequeña (refina, no reubica)
+            dx, dy = float(warp_matrix[0, 2]), float(warp_matrix[1, 2])
+            ang = abs(math.degrees(math.atan2(warp_matrix[1, 0], warp_matrix[0, 0])))
+            max_shift = 0.12 * max(wg.shape)
+            if cc > 0.3 and abs(dx) <= max_shift and abs(dy) <= max_shift and ang <= 5.0:
+                warped = cv2.warpAffine(
+                    warped, warp_matrix, sample_size,
+                    flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255),
+                )
+    except cv2.error:
+        pass  # ECC no convergió: nos quedamos con la similitud ORB
+    except Exception:  # noqa: BLE001
+        pass
+
+    return preprocessing.cv2_to_pil(warped), True
+
+
+def _refine_translation_by_text_anchors(
+    warped: Image.Image, tpl, sample_size: tuple[int, int]
+) -> Image.Image:
+    """Corrige el desplazamiento residual usando las anclas de TEXTO.
+
+    El texto de cabecera (p.ej. "OBSERVACIONES:") es idéntico en todos los
+    documentos del mismo tipo, así que su posición es una referencia fiable —al
+    contrario que ORB/ECC, que entre modelos distintos dejan ~60px de error. Se
+    mide el desfase medio (esperado vs encontrado) y se traslada la imagen.
+    """
+    text_anchors = [
+        a for a in (getattr(tpl, "anchors", []) or []) if a.use_text and a.anchor_text
+    ]
+    if not text_anchors:
+        return warped
+    tpl_border = getattr(tpl, "border", None) or matching.FULL_BORDER
+    W, H = sample_size
+    try:
+        words = ocr.run_ocr(warped)
+    except Exception:  # noqa: BLE001
+        return warped
+    dxs, dys = [], []
+    for a in text_anchors:
+        res = find_text_anchor(a.anchor_text, words, settings.anchor_text_threshold)
+        if not res["found"]:
+            continue
+        exp = matching.field_to_image({"x": a.x, "y": a.y, "w": a.w, "h": a.h}, tpl_border)
+        ex_cx = (exp["x"] + exp["w"] / 2) * W
+        ex_cy = (exp["y"] + exp["h"] / 2) * H
+        fc = res["region"]
+        fo_cx = (fc["x"] + fc["w"] / 2) * W
+        fo_cy = (fc["y"] + fc["h"] / 2) * H
+        dxs.append(ex_cx - fo_cx)
+        dys.append(ex_cy - fo_cy)
+    if not dxs:
+        return warped
+    dx = float(np.median(dxs))
+    dy = float(np.median(dys))
+    max_shift = 0.15 * max(W, H)
+    if abs(dx) > max_shift or abs(dy) > max_shift:
+        return warped  # desfase improbable: no arriesgar
+    if abs(dx) < 1 and abs(dy) < 1:
+        return warped
+    arr = preprocessing.pil_to_cv2(warped)
+    T = np.float32([[1, 0, dx], [0, 1, dy]])
+    shifted = cv2.warpAffine(
+        arr, T, sample_size,
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255),
+    )
+    return preprocessing.cv2_to_pil(shifted)
+
+
+def rectify_to_template(
+    located: list[dict[str, Any]],
+    image: Image.Image,
+    sample_size: tuple[int, int] | None,
+    sample_img: Image.Image | None = None,
+    tpl=None,
+    info: dict | None = None,
+) -> tuple[Image.Image | None, bool]:
+    """Rectifica `image` (doc->muestra). Prioriza la similitud ORB de página
+    completa (estable); si no, cae a la afín por centros de anclas. Finalmente
+    refina la traslación con las anclas de texto (referencia fiable entre modelos).
+
+    Devuelve (imagen_rectificada, ok). ok=False si la geometría no es plausible.
+    `info` (dict) se rellena con la traza: prerotate, rotation, scale, inliers, method.
+    """
+    if not sample_size:
+        return None, False
+
+    # 1) Similitud rígida ORB de página completa (preferida). ORB empareja el
+    #    contenido, así que la transformación ya incluye la rotación necesaria
+    #    (incluido 180°): no hace falta pre-orientar la imagen. Probamos la imagen
+    #    tal cual y, si el aspecto no casa con la muestra, su versión a 90°.
+    if sample_img is not None:
+        candidates = [(0, image)]
+        sw, sh = sample_size
+        tpl_ratio = (sw / sh) if sh else 1.0
+        img_ratio = (image.width / image.height) if image.height else 1.0
+        # Si la proporción difiere mucho, el documento está girado 90/270: probar rotado
+        if abs(img_ratio - tpl_ratio) > 0.3 * tpl_ratio:
+            candidates = [(90, image.rotate(-90, expand=True)),
+                          (270, image.rotate(-270, expand=True)),
+                          (0, image)]
+        for prerot, cand in candidates:
+            warped, ok = rectify_with_homography(cand, sample_img, sample_size, info)
+            if ok:
+                if info is not None:
+                    info["prerotate"] = prerot
+                    info["method"] = "orb-similarity"
+                if tpl is not None:
+                    warped = _refine_translation_by_text_anchors(warped, tpl, sample_size)
+                return warped, True
+
+    # 2) Fallback: afín por centros de anclas (>=3) / similitud (2)
+    pairs = [
+        (l["src_center"], l["dst_center"])
+        for l in located
+        if l["found"] and l["src_center"] and l["dst_center"]
+    ]
+    if len(pairs) < 2:
+        return None, False
+    src = np.float32([p[0] for p in pairs])  # muestra
+    dst = np.float32([p[1] for p in pairs])  # documento
+    if len(pairs) >= 3:
+        M, _ = cv2.estimateAffine2D(dst, src, method=cv2.RANSAC)
+    else:
+        M, _ = cv2.estimateAffinePartial2D(dst, src, method=cv2.RANSAC)
+    if M is None:
+        return None, False
+    p = _affine_params(M)
+    if not p:
+        return None, False
+    asx, asy = abs(p["sx"]), abs(p["sy"])
+    aniso = max(asx, asy) / max(1e-9, min(asx, asy))
+    if not (0.2 <= asx <= 5.0 and 0.2 <= asy <= 5.0):
+        return None, False
+    if p["sy"] <= 0 or aniso > settings.anchor_max_anisotropy or abs(p["shear"]) > settings.anchor_max_shear:
+        return None, False
+    arr = preprocessing.pil_to_cv2(image)
+    warped = cv2.warpAffine(
+        arr, M, sample_size,
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255),
+    )
+    return preprocessing.cv2_to_pil(warped), True
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +924,101 @@ def apply_transform_to_region(
         "w": round(nx1 - nx0, 5),
         "h": round(ny1 - ny0, 5),
     }
+
+
+def border_from_transform(
+    transform: dict[str, Any] | None,
+    tpl_border: dict[str, float] | None,
+    tpl_w: float | None,
+    tpl_h: float | None,
+    doc_w: float | None,
+    doc_h: float | None,
+) -> dict[str, float] | None:
+    """Borde del documento derivado de la transformación de anclas: mapea el borde
+    de la plantilla (toda su área de campos) al documento. Coherente con las anclas,
+    a diferencia de detect_border que en escaneos con tablas detecta una columna.
+    Devuelve None si no hay transformación.
+    """
+    if not transform:
+        return None
+    full = tpl_border or matching.FULL_BORDER
+    # El borde de la plantilla, como región relativa-al-borde, es (0,0,1,1)
+    reg = apply_transform_to_region(
+        {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        transform, full, tpl_w, tpl_h, doc_w, doc_h,
+    )
+    # Acotar a [0,1]
+    x = max(0.0, min(1.0, reg["x"]))
+    y = max(0.0, min(1.0, reg["y"]))
+    w = max(0.05, min(1.0 - x, reg["w"]))
+    h = max(0.05, min(1.0 - y, reg["h"]))
+    return {"x": round(x, 5), "y": round(y, 5), "w": round(w, 5), "h": round(h, 5)}
+
+
+# ---------------------------------------------------------------------------
+# Giro cardinal (90/180/270) deducido de las anclas de IMAGEN
+# ---------------------------------------------------------------------------
+
+def snap_orientation(transform: dict[str, Any] | None) -> int:
+    """Giro cardinal del documento respecto a la plantilla (0/90/180/270) según el
+    ángulo de la transformación de anclas. Devuelve 0 si no es un giro cardinal claro.
+    """
+    if not transform:
+        return 0
+    angle = transform.get("angle", 0.0) or 0.0
+    a = ((angle + 180) % 360) - 180   # normaliza a [-180, 180]
+    nearest = round(a / 90.0) * 90
+    if nearest % 360 == 0:
+        return 0
+    if abs(a - nearest) <= 20:        # razonablemente cerca de un múltiplo de 90
+        return int(nearest % 360)
+    return 0
+
+
+def _osd_rotate(image: Image.Image) -> tuple[int, float]:
+    """Orientación absoluta del texto vía OSD de Tesseract.
+
+    Devuelve (grados_a_rotar_horario, confianza). El OSD detecta si el texto está
+    en pie / 90 / 180 / 270, cosa que ORB (invariante a rotación) no puede.
+    """
+    import pytesseract
+
+    try:
+        osd = pytesseract.image_to_osd(image, output_type=pytesseract.Output.DICT)
+        return int(osd.get("rotate", 0)) % 360, float(osd.get("orientation_conf", 0) or 0)
+    except Exception:  # noqa: BLE001
+        return 0, 0.0
+
+
+def cardinal_rotation(db, doc, tpl, image: Image.Image) -> int:
+    """Giro cardinal (0/90/180/270) que hay que aplicar a `image` para enderezarla.
+
+    Combina dos señales independientes:
+      - PROPORCIÓN frente a la muestra (best_rotation_by_orb): fija el eje
+        (0/180 vs 90/270). ORB es invariante a la rotación, así que NO distingue
+        un giro de 180° por sí solo.
+      - OSD de Tesseract: da la orientación ABSOLUTA del texto (en pie / invertido),
+        que es lo que desambigua 90 vs 270 y 0 vs 180.
+
+    Si ambas coinciden en el eje, se usa el ángulo de OSD (preciso para el sentido).
+    Si OSD no tiene confianza, se cae al de la proporción.
+    """
+    sample_img = _sample_image(db, tpl)
+    if sample_img is None:
+        return 0
+    try:
+        ratio_angle, _inliers = preprocessing.best_rotation_by_orb(image, sample_img)
+        ratio_angle %= 360
+        osd_angle, osd_conf = _osd_rotate(image)
+
+        # Mismo eje (par/impar de 90°): proporción y OSD concuerdan -> usar OSD
+        if (ratio_angle % 180) == (osd_angle % 180):
+            return osd_angle if osd_conf >= 1.0 else ratio_angle
+        # Difieren de eje: si OSD es fiable, mandar OSD (orientación del texto);
+        # si no, quedarnos con la proporción (cambio de aspecto es señal fuerte).
+        return osd_angle if osd_conf >= 2.0 else ratio_angle
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,19 @@ from ..database import SessionLocal, get_db
 router = APIRouter(prefix="/api", tags=["processing"])
 
 
+def _reocr_persist(db, doc, image) -> None:
+    """Guarda la imagen, re-ejecuta OCR y recalcula borde/firma. Persiste en BD."""
+    image.save(doc.stored_path, "PNG")
+    words = ocr.run_ocr(image)
+    border = ocr.detect_border(image)
+    doc.width, doc.height = image.size
+    doc.ocr_words = words
+    doc.border = border
+    doc.signature = ocr.compute_signature(image, words, border)
+    db.commit()
+    db.refresh(doc)
+
+
 # ---------------------------------------------------------------------------
 # Lógica reutilizable de emparejado + extracción (la usan el endpoint /process
 # y la tarea de fondo de /jobs).
@@ -136,8 +149,14 @@ def _refine_fields_with_region_ocr(doc: models.Document, fields: dict) -> None:
         new_conf = res.get("confidence", 0) or 0
         # Sustituye solo si mejora: campo vacío, o el re-OCR no es menos fiable
         if not old_val or new_conf >= old_conf:
+            changed = txt != old_val
             fields[k]["value"] = txt
             fields[k]["confidence"] = new_conf
+            # Si el valor cambió respecto al OCR de página, la matched_box (calculada
+            # sobre el texto antiguo) ya no es válida -> usar la región de búsqueda,
+            # que cubre la celda completa del campo en la imagen rectificada.
+            if changed:
+                fields[k]["matched_box"] = fields[k].get("region")
 
 
 def _match_and_extract(
@@ -190,55 +209,69 @@ def _match_and_extract(
             db, doc, templates, tpl, score
         )
 
-    # Transformación de alineación a partir de las anclas localizadas
-    transform = (
-        anchors.estimate_transform(anchor_info["located"]) if anchor_info else None
-    )
-    tpl_dims = (
-        (anchor_info.get("tpl_w"), anchor_info.get("tpl_h")) if anchor_info else None
-    )
+    # -------------------------------------------------------------------
+    # Rectificación a la plantilla por anclas: enderezar la IMAGEN (no las
+    # coordenadas). Tras rectificar, los campos son proporcionalidad simple.
+    # -------------------------------------------------------------------
+    aligned = False
+    needs_review = False
+    anchor_public = None
+    anchor_score = 0.0
+    border_out = doc.border or dict(matching.FULL_BORDER)
+    pipeline: list[str] = []  # traza legible de lo que hizo el pipeline
 
-    fields = _extract_fields(tpl, doc, transform, tpl_dims)
-
-    # Detección de zona parcial (plantilla más pequeña que el documento). Solo si
-    # las anclas no han proporcionado ya una alineación.
-    zone = None
-    if tpl and tpl.sample_document_id and transform is None:
+    has_anchors = bool(tpl and getattr(tpl, "anchors", []) and tpl.sample_document_id)
+    if has_anchors and os.path.exists(doc.stored_path):
         try:
-            sample = db.get(models.Document, tpl.sample_document_id)
-            if (
-                sample
-                and os.path.exists(sample.stored_path)
-                and os.path.exists(doc.stored_path)
-            ):
-                doc_img = Image.open(doc.stored_path).convert("RGB")
-                sample_img = Image.open(sample.stored_path).convert("RGB")
-                dw, dh = doc_img.size
-                sw, sh = sample_img.size
-                if sw < dw * 0.85 or sh < dh * 0.85:
-                    zone = preprocessing.detect_best_zone(doc_img, sample_img)
-                    if zone.get("found") and zone.get("region"):
-                        zr = zone["region"]
-                        for key, fdata in fields.items():
-                            if fdata.get("region"):
-                                old_r = fdata["region"]
-                                fdata["region"] = {
-                                    "x": round(zr["x"] + old_r["x"] * zr["w"], 5),
-                                    "y": round(zr["y"] + old_r["y"] * zr["h"], 5),
-                                    "w": round(old_r["w"] * zr["w"], 5),
-                                    "h": round(old_r["h"] * zr["h"], 5),
-                                }
-                                extracted = matching.extract_field(
-                                    fdata["region"], doc.ocr_words
-                                )
-                                fdata["value"] = extracted["value"]
-                                fdata["confidence"] = extracted["confidence"]
-                                fdata["n_words"] = extracted["n_words"]
-        except Exception:  # noqa: BLE001
-            zone = None
+            image = Image.open(doc.stored_path).convert("RGB")
+            loc = anchors.locate_anchors_robust(db, doc, tpl, image)
+            anchor_public = anchors.public_anchors(loc["located"])
+            anchor_score = loc["score"]
+
+            if not anchors.required_ok(loc["located"]):
+                # Faltan anclas obligatorias: no tocar la imagen, marcar revisión
+                needs_review = True
+                pipeline.append("⚠ Anclas obligatorias no localizadas")
+            else:
+                rect_info: dict = {}
+                rect, ok = anchors.rectify_to_template(
+                    loc["located"], loc["image"], loc.get("sample_size"),
+                    loc.get("sample_img"), tpl, rect_info,
+                )
+                if ok and rect is not None:
+                    # Persistir la imagen rectificada: el doc queda encajado a la
+                    # plantilla -> borde = borde de la plantilla, extracción proporcional.
+                    _reocr_persist(db, doc, rect)
+                    doc.border = tpl.border or dict(matching.FULL_BORDER)
+                    db.commit()
+                    db.refresh(doc)
+                    border_out = doc.border
+                    aligned = True
+                    # Construir la traza legible del pipeline
+                    pre = rect_info.get("prerotate", 0)
+                    rot = rect_info.get("rotation", 0.0)
+                    total = (pre + rot) % 360
+                    if total > 180:
+                        total -= 360
+                    if abs(total) >= 1:
+                        pipeline.append(f"Girado/enderezado {total:+.0f}°")
+                    sc = rect_info.get("scale")
+                    if sc:
+                        pipeline.append(f"Escalado ×{sc:.2f}")
+                    pipeline.append("Alineado a la plantilla")
+                else:
+                    needs_review = True
+                    pipeline.append("⚠ No se pudo alinear (geometría no plausible)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[match] rectificación por anclas falló: {exc}", file=sys.stderr)
+            needs_review = True
+
+    # Extracción por PROPORCIONALIDAD simple sobre el borde (la imagen ya está
+    # rectificada al marco de la plantilla si aligned=True).
+    extract_border = tpl.border if (tpl and aligned) else doc.border
+    fields = matching.extract_all(tpl, doc.ocr_words, extract_border) if tpl else {}
 
     # Re-OCR de alta resolución de los campos flojos (mismo OCR del botón ↻).
-    # Aplica al procesado interactivo y al job de fondo (ambos pasan por aquí).
     _refine_fields_with_region_ocr(doc, fields)
 
     return {
@@ -247,9 +280,13 @@ def _match_and_extract(
         "template_name": tpl.name if tpl else None,
         "score": score,
         "vis_score": vis_score,
-        "zone": zone,
-        "anchors": anchors.public_anchors(anchor_info["located"]) if anchor_info else None,
-        "anchor_score": anchor_info["score"] if anchor_info else 0.0,
+        "zone": None,
+        "anchors": anchor_public,
+        "anchor_score": anchor_score,
+        "aligned": aligned,
+        "needs_review": needs_review,
+        "aligned_border": border_out,
+        "pipeline": pipeline,
         "fields": fields,
     }
 
@@ -284,11 +321,18 @@ def process_document(
         zone=res["zone"],
         anchors=res["anchors"],
         anchor_score=res["anchor_score"],
+        needs_review=res.get("needs_review", False),
+        aligned=res.get("aligned", False),
+        pipeline=res.get("pipeline", []),
+        sample_document_id=res["template"].sample_document_id if res["template"] else None,
         fields=res["fields"],
         width=doc.width,
         height=doc.height,
         ocr_words=doc.ocr_words,
-        border=doc.border or {"x": 0, "y": 0, "w": 1, "h": 1},
+        # El doc ya está rectificado al marco de la plantilla cuando aligned=True
+        border=res.get("aligned_border")
+        or doc.border
+        or {"x": 0, "y": 0, "w": 1, "h": 1},
     )
 
 
@@ -338,34 +382,10 @@ def _run_job(
             doc.signature = ocr.compute_signature(image, words, border)
             db.commit()
 
-        # 3) Emparejado + extracción geométrica
+        # 3) Emparejado + rectificación por anclas + extracción (todo en uno).
+        #    _match_and_extract endereza la imagen al marco de la plantilla cuando
+        #    localiza las anclas (incl. obligatorias) y extrae por proporcionalidad.
         m = _match_and_extract(db, doc, template_id)
-
-        # 3b) Orientación guiada por anclas de texto: si la plantilla tiene anclas
-        #     pero casan mal, probablemente el documento esté girado. Probamos
-        #     0/90/180/270 con las anclas y re-procesamos en el mejor ángulo.
-        tpl_obj = m["template"]
-        if (
-            tpl_obj is not None
-            and m.get("anchor_score", 0.0) < 0.5
-            and any(a.use_text and a.anchor_text for a in (tpl_obj.anchors or []))
-        ):
-            try:
-                image = Image.open(doc.stored_path).convert("RGB")
-                best_angle, a_score = anchors.estimate_orientation(image, tpl_obj)
-                if best_angle % 360 != 0 and a_score > m.get("anchor_score", 0.0):
-                    image = image.rotate(-best_angle, expand=True)
-                    image.save(doc.stored_path, "PNG")
-                    words = ocr.run_ocr(image)
-                    border = ocr.detect_border(image)
-                    doc.width, doc.height = image.size
-                    doc.ocr_words = words
-                    doc.border = border
-                    doc.signature = ocr.compute_signature(image, words, border)
-                    db.commit()
-                    m = _match_and_extract(db, doc, tpl_obj.id)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[job {record_id}] reorientación por anclas falló: {exc}", file=sys.stderr)
 
         values = {k: (v.get("value", "") or "") for k, v in m["fields"].items()}
         confs = [v.get("confidence", 0) for v in m["fields"].values() if v.get("value")]
@@ -382,11 +402,12 @@ def _run_job(
             except Exception as exc:  # noqa: BLE001
                 print(f"[job {record_id}] IA falló: {exc}", file=sys.stderr)
 
-        # 5) Decidir estado: revisar si no hay plantilla, baja similitud,
-        #    sin valores, o confianza media baja
+        # 5) Decidir estado: revisar si no hay plantilla, faltan anclas obligatorias,
+        #    baja similitud, sin valores, o confianza media baja
         has_values = any(str(v).strip() for v in values.values())
         needs_review = (
             m["template_id"] is None
+            or m.get("needs_review", False)
             or m["score"] < settings.match_threshold
             or not has_values
             or avg_conf < 40

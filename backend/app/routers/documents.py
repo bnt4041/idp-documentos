@@ -16,6 +16,19 @@ from ..database import get_db
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
+def _reocr_persist(db, doc, image) -> None:
+    """Guarda la imagen, re-ejecuta OCR y recalcula borde/firma. Persiste en BD."""
+    image.save(doc.stored_path, "PNG")
+    words = ocr.run_ocr(image)
+    border = ocr.detect_border(image)
+    doc.width, doc.height = image.size
+    doc.ocr_words = words
+    doc.border = border
+    doc.signature = ocr.compute_signature(image, words, border)
+    db.commit()
+    db.refresh(doc)
+
+
 @router.post("", response_model=schemas.DocumentOut)
 async def upload_document(
     file: UploadFile = File(...),
@@ -206,56 +219,34 @@ def auto_orient_document(
 
     tpl = db.get(models.Template, template_id) if template_id else None
 
+    # 1) Si la plantilla tiene anclas y muestra: rectificar la IMAGEN al marco de la
+    #    plantilla (multi-ángulo × multi-filtro + warp). Es el mismo núcleo que usa el
+    #    procesado, de modo que abrir para editar muestra el documento ya enderezado.
+    if tpl is not None and getattr(tpl, "anchors", []) and tpl.sample_document_id:
+        try:
+            image = Image.open(doc.stored_path).convert("RGB")
+            loc = anchors.locate_anchors_robust(db, doc, tpl, image)
+            if anchors.required_ok(loc["located"]):
+                rect, ok = anchors.rectify_to_template(
+                    loc["located"], loc["image"], loc.get("sample_size"),
+                    loc.get("sample_img"), tpl,
+                )
+                if ok and rect is not None:
+                    _reocr_persist(db, doc, rect)
+                    doc.border = tpl.border or dict(ocr.FULL_BORDER)
+                    db.commit()
+                    db.refresh(doc)
+                    return doc
+        except Exception:  # noqa: BLE001
+            pass  # cae al enderezado genérico
+
+    # 2) Sin plantilla/anclas (o rectificación no plausible): OSD + deskew fino genérico.
     image = Image.open(doc.stored_path).convert("RGB")
     orig_size = image.size
-
-    # 1) OSD (90° steps por contenido) + deskew fino (Hough) opcional.
     image, fine_angle, osd_angle = ocr.deskew_image(image, fine=fine_deskew)
     changed = (osd_angle % 360 != 0) or image.size != orig_size or abs(fine_angle) >= 0.1
-
-    # 2) Orientación 90° guiada por las anclas de texto de la plantilla
-    if tpl is not None and any(a.use_text and a.anchor_text for a in (tpl.anchors or [])):
-        try:
-            best_angle, _score = anchors.estimate_orientation(image, tpl)
-            if best_angle % 360 != 0:
-                image = image.rotate(-best_angle, expand=True)
-                changed = True
-        except Exception:  # noqa: BLE001
-            pass
-
-    # Persistir lo acumulado (re-OCR) antes del enderezado fino por anclas
     if changed:
-        image.save(doc.stored_path, "PNG")
-        words = ocr.run_ocr(image)
-        border = ocr.detect_border(image)
-        doc.width, doc.height = image.size
-        doc.ocr_words = words
-        doc.border = border
-        doc.signature = ocr.compute_signature(image, words, border)
-        db.commit()
-        db.refresh(doc)
-
-    # 3) Enderezado fino guiado por anclas (rotación deducida de 2+ anclas)
-    if tpl is not None and (tpl.anchors or []):
-        try:
-            info = anchors.locate_anchors(db, doc, tpl, image)
-            transform = anchors.estimate_transform(info["located"])
-            angle = transform.get("angle", 0.0) if transform else 0.0
-            if transform and 0.7 <= abs(angle) <= 20.0:
-                image = Image.open(doc.stored_path).convert("RGB").rotate(
-                    -angle, expand=True, fillcolor=(255, 255, 255)
-                )
-                image.save(doc.stored_path, "PNG")
-                words = ocr.run_ocr(image)
-                border = ocr.detect_border(image)
-                doc.width, doc.height = image.size
-                doc.ocr_words = words
-                doc.border = border
-                doc.signature = ocr.compute_signature(image, words, border)
-                db.commit()
-                db.refresh(doc)
-        except Exception:  # noqa: BLE001
-            pass
+        _reocr_persist(db, doc, image)
 
     return doc
 

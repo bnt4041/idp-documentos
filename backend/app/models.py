@@ -105,6 +105,8 @@ class TemplateAnchor(Base):
     # Señales activas del ancla
     use_text: Mapped[bool] = mapped_column(Boolean, default=True)
     use_image: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Si es obligatoria, debe localizarse para enderezar/alinear; si no, revisión manual
+    required: Mapped[bool] = mapped_column(Boolean, default=False)
     # Importancia relativa en el score de anclas
     weight: Mapped[float] = mapped_column(Float, default=1.0)
 

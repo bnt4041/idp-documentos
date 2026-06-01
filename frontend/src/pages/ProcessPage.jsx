@@ -308,6 +308,7 @@ function DocumentEditor({ record, onBack }) {
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [scanning, setScanning] = useState({});
+  const [anchorModal, setAnchorModal] = useState(false);
 
   // Carga inicial: documento + proceso + valores guardados del registro
   useEffect(() => {
@@ -335,7 +336,14 @@ function DocumentEditor({ record, onBack }) {
     const fs = {};
     const vs = {};
     Object.entries(res.fields).forEach(([k, v]) => {
-      fs[k] = { name: v.name, region: v.region, confidence: v.confidence, n_words: v.n_words };
+      // La caja se ajusta al texto realmente capturado (matched_box) cuando lo hay;
+      // si no, a la región teórica de la plantilla.
+      fs[k] = {
+        name: v.name,
+        region: v.matched_box || v.region,
+        confidence: v.confidence,
+        n_words: v.n_words,
+      };
       vs[k] = v.value;
     });
     setFields(fs);
@@ -590,16 +598,22 @@ function DocumentEditor({ record, onBack }) {
     }
   }
 
-  // Anclas localizadas en el documento (caja encontrada), para verificar el match
+  // Anclas para el overlay. Si el documento está ALINEADO a la plantilla, se
+  // dibujan en su posición de plantilla (proporcional, coherente con los campos);
+  // si no, en la caja que ORB encontró (para diagnosticar el match).
   const anchorRegions = (result?.anchors || [])
-    .filter((a) => a.region)
-    .map((a, i) => ({
-      key: `__anchor_${i}`,
-      name: `⚓ ${a.name}${a.found ? " ✓" : ""}`,
-      className: "anchor",
-      readOnly: true,
-      ...a.region,
-    }));
+    .map((a, i) => {
+      const box = result.aligned ? a.expected_region : a.region;
+      if (!box) return null;
+      return {
+        key: `__anchor_${i}`,
+        name: `⚓ ${a.name}${a.found ? " ✓" : ""}`,
+        className: "anchor",
+        readOnly: true,
+        ...box,
+      };
+    })
+    .filter(Boolean);
 
   const regions = [
     ...Object.entries(fields).map(([k, v]) => ({ key: k, name: v.name, ...v.region })),
@@ -764,18 +778,28 @@ function DocumentEditor({ record, onBack }) {
                       "badge " +
                       (result.anchors.every((a) => a.found) ? "ok" : "warn")
                     }
-                    title={result.anchors
-                      .map(
-                        (a) =>
-                          `${a.found ? "✓" : "✗"} ${a.name || "(ancla)"}`
-                      )
-                      .join("\n")}
                   >
                     🎯 {result.anchors.filter((a) => a.found).length}/
                     {result.anchors.length} anclas
                   </span>
                 )}
+                {result.anchors && result.anchors.length > 0 && (
+                  <button
+                    className="btn small"
+                    onClick={() => setAnchorModal(true)}
+                    title="Ver la huella de cada ancla: plantilla vs detectada"
+                  >
+                    ⚓ Ver anclas
+                  </button>
+                )}
               </div>
+              {result.pipeline && result.pipeline.length > 0 && (
+                <ul className="pipeline-trace">
+                  {result.pipeline.map((step, i) => (
+                    <li key={i}>{step}</li>
+                  ))}
+                </ul>
+              )}
             </div>
             {!result.template_id && (
               <p className="warn-text">
@@ -785,6 +809,18 @@ function DocumentEditor({ record, onBack }) {
             )}
             {lowConfidence && result.template_id && (
               <p className="warn-text">Coincidencia baja: revisa los campos antes de confirmar.</p>
+            )}
+            {result.needs_review && result.template_id && (
+              <p className="warn-text">
+                ⚠ No se localizaron las anclas obligatorias: el documento no se ha
+                enderezado automáticamente. Ajusta la orientación (🧭 Auto / girar) y las
+                zonas a mano antes de confirmar.
+              </p>
+            )}
+            {result.aligned && (
+              <p className="muted small">
+                ✓ Documento enderezado y alineado a la plantilla.
+              </p>
             )}
 
             {result.template_id && (
@@ -895,7 +931,97 @@ function DocumentEditor({ record, onBack }) {
           </>
         )}
       </aside>
+
+      {anchorModal && result && (
+        <AnchorFootprintModal
+          anchors={result.anchors || []}
+          docImageUrl={`${api.documentImageUrl(documentId)}?v=${imgRev}`}
+          sampleImageUrl={
+            result.sample_document_id
+              ? api.documentImageUrl(result.sample_document_id)
+              : null
+          }
+          onClose={() => setAnchorModal(false)}
+        />
+      )}
     </div>
+  );
+}
+
+// Modal de huella de anclas: recorta al vuelo cada ancla de la muestra (esperada)
+// y del documento (detectada) usando las coordenadas normalizadas.
+function AnchorFootprintModal({ anchors, docImageUrl, sampleImageUrl, onClose }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal anchor-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>⚓ Huella de anclas</h3>
+          <button className="btn small" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <p className="muted small">
+          Comparación de cada ancla: a la izquierda, la zona de la plantilla
+          (esperada); a la derecha, la zona localizada en el documento.
+        </p>
+        <div className="anchor-foot-list">
+          {anchors.map((a, i) => (
+            <div className="anchor-foot-row" key={i}>
+              <div className="anchor-foot-label">
+                <strong>⚓ {a.name || "(ancla)"}</strong>
+                <span className={"badge " + (a.found ? "ok" : "danger")}>
+                  {a.found ? "✓ detectada" : "✗ no encontrada"}
+                </span>
+                <span className="muted small">
+                  {a.text_score > 0 && `texto ${Math.round(a.text_score * 100)}%`}
+                  {a.text_score > 0 && a.image_score > 0 && " · "}
+                  {a.image_score > 0 && `imagen ${Math.round(a.image_score * 100)}%`}
+                </span>
+              </div>
+              <div className="anchor-foot-crops">
+                <figure>
+                  <CropView imageUrl={sampleImageUrl} box={a.expected_region} />
+                  <figcaption>Plantilla</figcaption>
+                </figure>
+                <figure>
+                  <CropView imageUrl={docImageUrl} box={a.region} />
+                  <figcaption>Detectada</figcaption>
+                </figure>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Recorta una región normalizada de una imagen usando background-position/size.
+function CropView({ imageUrl, box }) {
+  if (!imageUrl || !box || !box.w || !box.h) {
+    return <div className="anchor-crop empty">—</div>;
+  }
+  // Mostrar la región con un pequeño margen para contexto
+  const pad = 0.4;
+  const w = Math.min(1, box.w * (1 + 2 * pad));
+  const h = Math.min(1, box.h * (1 + 2 * pad));
+  const x = Math.max(0, box.x - box.w * pad);
+  const y = Math.max(0, box.y - box.h * pad);
+  // Escala: la imagen de fondo se amplía 1/w (o 1/h) para que la región llene la caja
+  const bgW = (1 / w) * 100;
+  const bgH = (1 / h) * 100;
+  const posX = w < 1 ? (x / (1 - w)) * 100 : 0;
+  const posY = h < 1 ? (y / (1 - h)) * 100 : 0;
+  return (
+    <div
+      className="anchor-crop"
+      style={{
+        backgroundImage: `url(${imageUrl})`,
+        backgroundSize: `${bgW}% ${bgH}%`,
+        backgroundPosition: `${posX}% ${posY}%`,
+        backgroundRepeat: "no-repeat",
+      }}
+    />
   );
 }
 

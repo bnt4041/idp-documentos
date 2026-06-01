@@ -87,6 +87,7 @@ export default function TemplateEditor() {
           anchor_text: a.anchor_text || "",
           use_text: a.use_text,
           use_image: a.use_image,
+          required: a.required ?? false,
           weight: a.weight ?? 1.0,
         }))
       );
@@ -242,7 +243,7 @@ export default function TemplateEditor() {
   }
 
   // Crear un ancla a partir de la selección pendiente
-  function confirmAnchor(anchorName, useText, useImage) {
+  function confirmAnchor(anchorName, useText, useImage, required) {
     if (!pending || !anchorName.trim()) return;
     const rel = imgToRel(pending, border);
     const key = `a_${Date.now()}`;
@@ -255,6 +256,7 @@ export default function TemplateEditor() {
         anchor_text: pending.sample_text || "",
         use_text: useText,
         use_image: useImage,
+        required: !!required,
         weight: 1.0,
       },
     ]);
@@ -400,6 +402,7 @@ export default function TemplateEditor() {
           anchor_text: a.anchor_text || "",
           use_text: a.use_text,
           use_image: a.use_image,
+          required: !!a.required,
           weight: a.weight ?? 1.0,
         })),
       };
@@ -660,7 +663,14 @@ export default function TemplateEditor() {
                     onClick={() => setActiveKey(ANCHOR_PREFIX + a.key)}
                   >
                     <div>
-                      <strong>⚓ {a.name}</strong>
+                      <strong>
+                        ⚓ {a.name}
+                        {a.required && (
+                          <span className="badge warn" style={{ marginLeft: 6 }}>
+                            oblig.
+                          </span>
+                        )}
+                      </strong>
                       <code>
                         {a.use_text ? "texto" : ""}
                         {a.use_text && a.use_image ? "+" : ""}
@@ -736,6 +746,7 @@ function PendingAnchor({ sampleText, scanning, confidence, onConfirm, onCancel }
   const [name, setName] = useState("");
   const [useText, setUseText] = useState(true);
   const [useImage, setUseImage] = useState(true);
+  const [required, setRequired] = useState(true);
   const hasText = Boolean((sampleText || "").trim());
 
   return (
@@ -750,7 +761,9 @@ function PendingAnchor({ sampleText, scanning, confidence, onConfirm, onCancel }
         placeholder="Nombre del ancla (ej. Cabecera, Logo)"
         value={name}
         onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && onConfirm(name, useText, useImage)}
+        onKeyDown={(e) =>
+          e.key === "Enter" && onConfirm(name, useText, useImage, required)
+        }
       />
       <div className="anchor-flags">
         <label title="Casar por el texto OCR fijo de esta zona">
@@ -770,12 +783,20 @@ function PendingAnchor({ sampleText, scanning, confidence, onConfirm, onCancel }
           />{" "}
           Usar imagen
         </label>
+        <label title="Debe localizarse para enderezar/alinear; si no, revisión manual">
+          <input
+            type="checkbox"
+            checked={required}
+            onChange={(e) => setRequired(e.target.checked)}
+          />{" "}
+          Obligatoria
+        </label>
       </div>
       <div className="row">
         <button
           className="btn primary small"
           disabled={!(useImage || (useText && hasText))}
-          onClick={() => onConfirm(name, useText && hasText, useImage)}
+          onClick={() => onConfirm(name, useText && hasText, useImage, required)}
         >
           Crear ancla
         </button>

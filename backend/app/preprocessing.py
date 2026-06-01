@@ -687,6 +687,68 @@ def visual_similarity_score(
     return round(best_score, 4)
 
 
+def best_rotation_by_orb(
+    doc_img: Image.Image,
+    sample_img: Image.Image,
+    angles: list[int] | None = None,
+    min_inliers: int = 12,
+) -> tuple[int, int]:
+    """Detecta el giro cardinal del documento respecto a la muestra completa.
+
+    Rota el DOCUMENTO en cada ángulo y cuenta los inliers ORB contra la imagen de
+    muestra completa de la plantilla; gana el ángulo con más inliers. A diferencia
+    de localizar parches pequeños (poco fiable entre documentos distintos), comparar
+    las dos páginas enteras es robusto: el contenido global solo encaja en la
+    orientación correcta.
+
+    Devuelve (ángulo_a_aplicar, inliers_del_mejor). ángulo 0 si no hay señal clara.
+
+    Importante: ORB es INVARIANTE a la rotación, así que el conteo de inliers por sí
+    solo NO distingue bien 0/90/180/270. Por eso se prioriza la PROPORCIÓN (aspect
+    ratio): solo se consideran las orientaciones cuyo aspecto, una vez rotado, casa
+    con el de la muestra. Entre las candidatas (p.ej. 90 vs 270) se desempata por
+    inliers ORB.
+    """
+    if angles is None:
+        angles = [0, 90, 180, 270]
+
+    tpl_gray = sample_img.convert("L")
+    sw, sh = sample_img.size
+    tpl_ratio = (sw / sh) if sh else 1.0
+    dw, dh = doc_img.size
+    doc_ratio = (dw / dh) if dh else 1.0
+
+    def ratio_at(angle: int) -> float:
+        r = doc_ratio
+        return r if angle in (0, 180) else (1.0 / r if r else 1.0)
+
+    def ratio_ok(angle: int) -> bool:
+        # ¿el aspecto del documento rotado se parece al de la muestra?
+        ra = ratio_at(angle)
+        return abs(ra - tpl_ratio) <= 0.35 * tpl_ratio
+
+    # Candidatas: orientaciones cuyo aspecto casa con la muestra. Si la proporción
+    # de muestra y documento es claramente distinta, esto descarta 0/180 (o 90/270).
+    candidates = [a for a in angles if ratio_ok(a)] or list(angles)
+
+    best_angle, best_inliers = 0, -1
+    for angle in candidates:
+        doc_rot = doc_img if angle == 0 else doc_img.rotate(-angle, expand=True)
+        try:
+            res = detect_zones_orb(doc_rot.convert("L"), tpl_gray, min_matches=8)
+        except Exception:  # noqa: BLE001
+            continue
+        inliers = res.get("inliers", 0) if res.get("found") else 0
+        if inliers > best_inliers:
+            best_inliers, best_angle = inliers, angle
+
+    # Si la mejor orientación tiene aspecto distinto al de la muestra y NO hay
+    # evidencia ORB suficiente, no arriesgamos un giro.
+    if best_inliers < min_inliers and best_angle == 0:
+        return 0, max(0, best_inliers)
+    return best_angle, max(0, best_inliers)
+
+
 def visual_similarity_from_images(
     doc_img: Image.Image,
     tpl_img: Image.Image,
