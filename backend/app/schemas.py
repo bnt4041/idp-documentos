@@ -111,6 +111,7 @@ class TemplateOut(BaseModel):
     signature: dict
     border: dict
     sample_document_id: int | None
+    is_universal: bool = False
     created_at: datetime
     fields: list[FieldOut]
     anchors: list[AnchorOut] = []
@@ -135,6 +136,8 @@ class MatchResult(BaseModel):
     pipeline: list[str] = []
     # Id del documento de muestra de la plantilla (para el modal de huella de anclas)
     sample_document_id: int | None = None
+    # True si es la plantilla universal "datos IA" (extracción libre sin campos fijos)
+    is_universal: bool = False
     fields: dict
     width: int
     height: int

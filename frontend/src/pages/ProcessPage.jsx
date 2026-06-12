@@ -46,8 +46,11 @@ function JobList({ onOpen }) {
   const [modal, setModal] = useState(null); // { job, data }
   const pollRef = useRef(null);
 
-  // Nombre legible de un campo: el de la plantilla si existe, si no la clave
+  // Nombre legible de un campo: el de la plantilla si existe, si no la clave.
+  // Las claves internas (prefijo _) tienen nombres especiales.
   function fieldName(job, key) {
+    if (key === "_tipo_documento") return "📋 Tipo de documento";
+    if (key.startsWith("_")) return key.slice(1);
     const tpl = templates.find((t) => t.id === job.template_id);
     const f = tpl?.fields?.find((ff) => ff.key === key);
     return f?.name || key;
@@ -174,7 +177,13 @@ function JobList({ onOpen }) {
                     onClick={() => openJob(job)}
                   >
                     <td className="job-name">{job.filename}</td>
-                    <td>{job.template_name || <span className="muted">—</span>}</td>
+                    <td>
+                      {job.template_name === "datos IA"
+                        ? <span className="muted">📋 IA libre</span>
+                        : job.template_name || (job.tipo_documento
+                          ? <span className="muted">📋 {job.tipo_documento} <span className="badge ok" style={{fontSize:'0.65rem'}}>IA</span></span>
+                          : <span className="muted">—</span>)}
+                    </td>
                     <td>
                       <span className={st.cls}>
                         {st.spin && <span className="mini-spinner" />}
@@ -234,7 +243,12 @@ function JobList({ onOpen }) {
               </button>
             </div>
             <p className="muted small">
-              {modal.job.template_name || "Sin plantilla"}
+              {modal.job.template_name
+                || (modal.data?._tipo_documento
+                  ? `📋 ${modal.data._tipo_documento} (IA)`
+                  : modal.job.tipo_documento
+                    ? `📋 ${modal.job.tipo_documento} (IA)`
+                    : "Sin plantilla")}
               {modal.job.match_score
                 ? ` · ${Math.round(modal.job.match_score * 100)}% similitud`
                 : ""}
@@ -746,7 +760,17 @@ function DocumentEditor({ record, onBack }) {
         ) : (
           <>
             <div className="match-info">
-              <h3>{result.template_name || "Sin plantilla"}</h3>
+              <h3>
+                {result.is_universal
+                  ? "📋 Extracción IA"
+                  : result.template_name || "Sin plantilla"}
+              </h3>
+              {result.is_universal && (
+                <p className="hint" style={{ marginTop: 0 }}>
+                  No se ha encontrado una plantilla que encaje. La IA analizará el
+                  documento y extraerá los datos que considere relevantes.
+                </p>
+              )}
               <div className="form-row template-switch">
                 <label>Plantilla</label>
                 <select
@@ -758,15 +782,21 @@ function DocumentEditor({ record, onBack }) {
                   <option value="">Auto-detectar</option>
                   {templates.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {t.name}
+                      {t.is_universal ? `📋 ${t.name} (automática)` : t.name}
                     </option>
                   ))}
                 </select>
               </div>
               <div className="match-scores">
-                <span className={"badge " + (lowConfidence ? "warn" : "ok")}>
-                  {(result.match_score * 100).toFixed(0)}% similitud
-                </span>
+                {result.is_universal ? (
+                  <span className="badge ok" style={{ background: "#7c3aed" }}>
+                    🤖 IA libre
+                  </span>
+                ) : (
+                  <span className={"badge " + (lowConfidence ? "warn" : "ok")}>
+                    {(result.match_score * 100).toFixed(0)}% similitud
+                  </span>
+                )}
                 {result.visual_score > 0 && (
                   <span className="badge visual-score" title="Similitud visual (ORB) con la imagen de muestra">
                     👁️ {(result.visual_score * 100).toFixed(0)}% visual

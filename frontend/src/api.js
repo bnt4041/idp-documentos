@@ -115,6 +115,17 @@ export const api = {
   aiExtract: (docId, templateId) =>
     http(`/api/ai/extract/${docId}?template_id=${templateId}`, { method: "POST" }),
 
+  // Configuración del backend de IA
+  getAIConfig: () => http("/api/config/ai"),
+  updateAIConfig: (payload) =>
+    http("/api/config/ai", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  getTokenStats: () => http("/api/config/ai/tokens"),
+  resetTokenStats: () => http("/api/config/ai/tokens/reset", { method: "POST" }),
+
   // Admin
   resetAll: () => http("/api/reset", { method: "POST" }),
 };

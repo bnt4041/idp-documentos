@@ -59,7 +59,9 @@ export default function TemplatesPage() {
                   🧠 {t.example_count ?? 0}
                 </span>
               </div>
-              <p className="muted small">{t.description || "Sin descripción"}</p>
+              <p className="muted small">
+                {t.is_universal ? "🤖 Plantilla automática: la IA extrae los datos sin campos predefinidos." : t.description || "Sin descripción"}
+              </p>
 
               {t.sample_document_id && (
                 <img
@@ -85,9 +87,11 @@ export default function TemplatesPage() {
                 <Link className="btn" to={`/plantillas/${t.id}`}>
                   Editar
                 </Link>
-                <button className="btn danger" onClick={() => remove(t.id)}>
-                  Eliminar
-                </button>
+                {!t.is_universal && (
+                  <button className="btn danger" onClick={() => remove(t.id)}>
+                    Eliminar
+                  </button>
+                )}
               </div>
             </div>
           ))}

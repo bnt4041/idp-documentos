@@ -145,7 +145,7 @@ def extract(db, document, template) -> dict[str, Any]:
     prompt = _build_prompt(template, examples, text)
     images = _image_b64(document) if settings.ollama_vision else None
     try:
-        raw = ollama_client.generate_json(prompt, images=images)
+        raw = ollama_client.generate_json(prompt, images=images, force_json=True)
         data = json.loads(raw)
     except Exception as exc:  # noqa: BLE001
         return {
@@ -159,16 +159,109 @@ def extract(db, document, template) -> dict[str, Any]:
     fields = {}
     for f in template.fields:
         entry = data.get(f.key)
-        # El modelo puede devolver el valor directo o un objeto {value:...}
         if isinstance(entry, dict):
             entry = entry.get("value", "")
         value = str(entry or "")
-        region = _region_from_value(words, value)  # localización determinista
+        region = _region_from_value(words, value)
         fields[f.key] = {"name": f.name, "value": value, "region": region}
     return {
         "available": True,
         "fields": fields,
         "used_examples": len(examples),
+        "model": settings.ollama_model,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Extracción libre (sin plantilla): el LLM decide qué extraer
+# ---------------------------------------------------------------------------
+
+_FREEFORM_PROMPT = (
+    "Eres un extractor inteligente de documentos. Te voy a dar el TEXTO OCR de un "
+    "documento (factura, DNI, contrato, formulario, permiso de circulación, nómina, "
+    "etc.).\n\n"
+    "Tu tarea:\n"
+    "1. Identifica QUÉ TIPO de documento es.\n"
+    "2. Extrae TODOS los datos relevantes que encuentres.\n"
+    "3. Devuelve ÚNICAMENTE un objeto JSON con este formato:\n\n"
+    '{{"tipo_documento": "factura", "datos": {{"campo1": "valor1", "campo2": "valor2", ...}}}}\n\n'
+    "REGLAS:\n"
+    "- Usa claves descriptivas en snake_case (ej. 'nombre_cliente', 'fecha_emision', "
+    "'importe_total', 'dni', 'matricula').\n"
+    "- Los valores deben ser el texto LIMPIO, sin la etiqueta (ej. si dice "
+    "'Nombre: Juan Pérez' -> 'Juan Pérez').\n"
+    "- Si un dato está compuesto por varias partes (ej. dirección en 2 líneas), "
+    "únelas en un solo valor.\n"
+    "- Si no estás seguro de algo, no inventes: omite ese campo.\n"
+    "- No incluyas comentarios, solo el JSON.\n\n"
+    "TEXTO OCR DEL DOCUMENTO:\n{text}\n\n"
+    "Responde solo con el JSON."
+)
+
+
+def extract_freeform(db, document) -> dict[str, Any]:
+    """Extrae datos con el LLM sin plantilla: el modelo decide qué campos extraer.
+
+    Devuelve {available, tipo_documento, fields: {key: {value, region}}, model}.
+    Si el LLM no está disponible, devuelve available=False para que el caller
+    use un fallback determinista (field_suggestions).
+    """
+    if not ollama_client.available():
+        import sys
+        print("[rag] extract_freeform: LLM no disponible", file=sys.stderr)
+        return {
+            "available": False,
+            "tipo_documento": None,
+            "fields": {},
+            "model": settings.ollama_model,
+        }
+
+    words = document.ocr_words or []
+    text = ocr_text(words)
+    import sys
+    print(f"[rag] extract_freeform: {len(words)} palabras OCR, texto={text[:120]}...", file=sys.stderr)
+
+    prompt = _FREEFORM_PROMPT.format(text=text[:3000])
+    images = _image_b64(document) if settings.ollama_vision else None
+
+    try:
+        raw = ollama_client.generate_json(
+            prompt, images=images, force_json=True, num_predict=512,
+        )
+        print(f"[rag] extract_freeform: respuesta raw={raw[:200]}...", file=sys.stderr)
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"[rag] extract_freeform: JSON inválido: {exc}", file=sys.stderr)
+        return {
+            "available": True,
+            "error": f"JSON inválido: {exc}",
+            "tipo_documento": None,
+            "fields": {},
+            "model": settings.ollama_model,
+        }
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rag] extract_freeform: error: {exc}", file=sys.stderr)
+        return {
+            "available": True,
+            "error": str(exc),
+            "tipo_documento": None,
+            "fields": {},
+            "model": settings.ollama_model,
+        }
+
+    tipo = data.get("tipo_documento", "desconocido") if isinstance(data, dict) else "desconocido"
+    datos = data.get("datos", {}) if isinstance(data, dict) else {}
+
+    fields = {}
+    for key, value in datos.items():
+        value_str = str(value or "")
+        region = _region_from_value(words, value_str)
+        fields[key] = {"value": value_str, "region": region}
+
+    return {
+        "available": True,
+        "tipo_documento": tipo,
+        "fields": fields,
         "model": settings.ollama_model,
     }
 

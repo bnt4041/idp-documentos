@@ -18,7 +18,7 @@ from fastapi import (
 from PIL import Image
 from sqlalchemy.orm import Session
 
-from .. import anchors, matching, models, ocr, preprocessing, rag, schemas
+from .. import anchors, field_suggestions, matching, models, ocr, preprocessing, rag, schemas
 from ..config import settings
 from ..database import SessionLocal, get_db
 
@@ -210,6 +210,26 @@ def _match_and_extract(
         )
 
     # -------------------------------------------------------------------
+    # Si el score está por debajo del umbral y no se forzó plantilla,
+    # descartamos la asignación. Además, si NO hubo confirmación visual
+    # (ORB), la firma geométrica sola NO es fiable: dos documentos A4
+    # cualesquiera pueden puntuar >0.55 solo por aspect ratio y color.
+    # Exigimos confirmación visual para aceptar un match automático.
+    # -------------------------------------------------------------------
+    if template_id is None and tpl is not None:
+        has_visual = vis_score > 0.05  # ORB encontró keypoints comunes reales
+        reject = (
+            (not has_visual and score < 0.85)
+            or (has_visual and score < settings.match_threshold)
+        )
+        if reject:
+            # No se parece a ninguna plantilla guardada → usar la universal "datos IA"
+            tpl = db.query(models.Template).filter_by(is_universal=True).first()
+            score = 0.0
+            vis_score = 0.0
+            anchor_info = None
+
+    # -------------------------------------------------------------------
     # Rectificación a la plantilla por anclas: enderezar la IMAGEN (no las
     # coordenadas). Tras rectificar, los campos son proporcionalidad simple.
     # -------------------------------------------------------------------
@@ -325,6 +345,7 @@ def process_document(
         aligned=res.get("aligned", False),
         pipeline=res.get("pipeline", []),
         sample_document_id=res["template"].sample_document_id if res["template"] else None,
+        is_universal=bool(res["template"] and getattr(res["template"], "is_universal", False)),
         fields=res["fields"],
         width=doc.width,
         height=doc.height,
@@ -391,26 +412,70 @@ def _run_job(
         confs = [v.get("confidence", 0) for v in m["fields"].values() if v.get("value")]
         avg_conf = sum(confs) / len(confs) if confs else 0.0
 
-        # 4) Extracción con IA (LLM + RAG) si hay plantilla y está disponible
+        # 4) Extracción con IA (LLM + RAG). Si la plantilla es la universal
+        #    ("datos IA"), usamos extracción libre. Si es una plantilla normal,
+        #    extraemos sus campos con few-shot. Si el LLM no está disponible o
+        #    falla, usamos field_suggestions como fallback determinista.
         if m["template"] is not None:
-            try:
-                ai = rag.extract(db, doc, m["template"])
-                if ai.get("available") and ai.get("fields"):
-                    for k, fv in ai["fields"].items():
-                        if fv.get("value"):
-                            values[k] = fv["value"]
-            except Exception as exc:  # noqa: BLE001
-                print(f"[job {record_id}] IA falló: {exc}", file=sys.stderr)
+            is_universal = getattr(m["template"], "is_universal", False)
+            if is_universal:
+                # Plantilla universal: IA libre (sin campos predefinidos)
+                ai_fields = {}
+                try:
+                    ai = rag.extract_freeform(db, doc)
+                    if ai.get("available") and ai.get("fields"):
+                        tipo = ai.get("tipo_documento", "desconocido")
+                        values["_tipo_documento"] = tipo
+                        ai_fields = ai["fields"]
+                    else:
+                        print(f"[job {record_id}] IA libre no disponible, usando field_suggestions",
+                              file=sys.stderr)
+                except Exception as exc:
+                    print(f"[job {record_id}] IA libre falló: {exc}", file=sys.stderr)
 
-        # 5) Decidir estado: revisar si no hay plantilla, faltan anclas obligatorias,
-        #    baja similitud, sin valores, o confianza media baja
-        has_values = any(str(v).strip() for v in values.values())
+                # Fallback: si la IA no devolvió nada, usar field_suggestions (reglas)
+                if not ai_fields:
+                    try:
+                        suggestions = field_suggestions.analyze_words(doc.ocr_words or [])
+                        for s in suggestions:
+                            key = s["key"]
+                            val = s.get("sample_text", "")
+                            if val:
+                                ai_fields[key] = {"value": val, "region": s}
+                        if ai_fields:
+                            values["_tipo_documento"] = values.get("_tipo_documento", "detectado")
+                            print(f"[job {record_id}] field_suggestions extrajo {len(ai_fields)} campos",
+                                  file=sys.stderr)
+                    except Exception as exc:
+                        print(f"[job {record_id}] field_suggestions falló: {exc}", file=sys.stderr)
+
+                for k, fv in ai_fields.items():
+                    val = fv.get("value", "") if isinstance(fv, dict) else str(fv)
+                    if val:
+                        values[k] = val
+            else:
+                try:
+                    ai = rag.extract(db, doc, m["template"])
+                    if ai.get("available") and ai.get("fields"):
+                        for k, fv in ai["fields"].items():
+                            if fv.get("value"):
+                                values[k] = fv["value"]
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[job {record_id}] IA falló: {exc}", file=sys.stderr)
+
+        # 5) Decidir estado: revisar si faltan anclas obligatorias, baja similitud,
+        #    sin valores, o confianza media baja. Si no hay plantilla pero la IA
+        #    extrajo datos en modo libre, se considera válido.
+        has_values = any(
+            str(v).strip()
+            for k, v in values.items()
+            if not k.startswith("_")  # _tipo_documento no cuenta para "sin valores"
+        )
         needs_review = (
-            m["template_id"] is None
-            or m.get("needs_review", False)
-            or m["score"] < settings.match_threshold
+            m.get("needs_review", False)
+            or (m["template_id"] is not None and m["score"] < settings.match_threshold)
             or not has_values
-            or avg_conf < 40
+            or (m["template_id"] is not None and avg_conf < 40)
         )
         rec.template_id = m["template_id"]
         rec.match_score = round(float(m["score"]), 4)
@@ -499,9 +564,10 @@ def list_jobs(db: Session = Depends(get_db)):
             "filename": doc_names.get(r.document_id, "—"),
             "template_id": r.template_id,
             "template_name": tpl_names.get(r.template_id),
+            "tipo_documento": (r.data or {}).get("_tipo_documento", ""),
             "status": r.status,
             "match_score": r.match_score,
-            "n_fields": len(r.data or {}),
+            "n_fields": sum(1 for k in (r.data or {}) if not k.startswith("_")),
             "created_at": r.created_at,
         }
         for r in recs

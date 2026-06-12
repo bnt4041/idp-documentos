@@ -4,6 +4,7 @@ import TemplatesPage from "./pages/TemplatesPage.jsx";
 import TemplateEditor from "./pages/TemplateEditor.jsx";
 import ProcessPage from "./pages/ProcessPage.jsx";
 import RecordsPage from "./pages/RecordsPage.jsx";
+import ConfigPage from "./pages/ConfigPage.jsx";
 import { api } from "./api.js";
 
 export default function App() {
@@ -46,6 +47,7 @@ export default function App() {
           </NavLink>
           <NavLink to="/procesar">Procesar documento</NavLink>
           <NavLink to="/registros">Registros</NavLink>
+          <NavLink to="/configuracion">⚙️ Configuración</NavLink>
         </nav>
         <div className="topbar-right">
           <button
@@ -65,6 +67,7 @@ export default function App() {
           <Route path="/plantillas/:id" element={<TemplateEditor />} />
           <Route path="/procesar" element={<ProcessPage />} />
           <Route path="/registros" element={<RecordsPage />} />
+          <Route path="/configuracion" element={<ConfigPage />} />
         </Routes>
       </main>
     </div>

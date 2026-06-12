@@ -109,6 +109,8 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
     tpl = db.get(models.Template, template_id)
     if not tpl:
         raise HTTPException(404, "Plantilla no encontrada")
+    if tpl.is_universal:
+        raise HTTPException(400, "No se puede eliminar la plantilla universal 'datos IA'")
     # Borrado manual de todos los hijos en orden (por si las FK en la BD
     # no tienen ON DELETE CASCADE / SET NULL tras un create_all inicial).
     # Orden: records (SET NULL), learning_examples (DELETE), template_fields (DELETE)

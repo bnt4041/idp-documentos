@@ -43,6 +43,11 @@ services:
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       OLLAMA_GEN_URL: ${OLLAMA_GEN_URL:-}
       OLLAMA_GEN_API_KEY: ${OLLAMA_GEN_API_KEY:-}
+      # DeepSeek API (cloud). Si DEEPSEEK_ENABLED=true, la generación usa DeepSeek.
+      DEEPSEEK_ENABLED: ${DEEPSEEK_ENABLED:-false}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
     volumes:
       - uploads:/data/uploads
     ports:

@@ -1013,3 +1013,151 @@ hr {
   gap: 0.6rem;
   margin-top: 1rem;
 }
+
+/* =============================================================
+   Página de CONFIGURACIÓN
+   ============================================================= */
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 1rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+}
+.status-bar .sep {
+  color: var(--border);
+}
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.on {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.2);
+}
+.status-dot.off {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.2);
+}
+
+.config-section {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.2rem 1.4rem;
+  margin-bottom: 1.5rem;
+  background: #fff;
+}
+.config-section legend {
+  font-weight: 700;
+  font-size: 1rem;
+  padding: 0 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.config-section legend .badge {
+  font-size: 0.7rem;
+}
+
+.form-row-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+}
+.form-row-2col > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.checkbox-label {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  font-size: 0.9rem !important;
+  color: #0f172a !important;
+}
+.checkbox-label input[type="checkbox"] {
+  width: auto;
+  accent-color: var(--primary);
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 0.5rem;
+}
+.msg-ok {
+  color: var(--ok);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.msg-error {
+  color: var(--danger);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+/* =============================================================
+   Panel de consumo de tokens (ConfigPage)
+   ============================================================= */
+
+.token-panel {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.2rem;
+  margin-bottom: 1.5rem;
+}
+.token-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.8rem;
+}
+.token-panel-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+.token-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.6rem;
+}
+.token-card {
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.7rem 0.8rem;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.token-card.cost {
+  background: #fefce8;
+  border-color: #fde68a;
+}
+.token-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+.token-card.cost .token-value {
+  font-size: 0.95rem;
+  color: #92400e;
+}
+.token-label {
+  font-size: 0.72rem;
+  color: var(--muted);
+}

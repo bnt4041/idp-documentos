@@ -50,6 +50,9 @@ class Template(Base):
     sample_document_id: Mapped[int | None] = mapped_column(
         ForeignKey("documents.id"), nullable=True
     )
+    # Plantilla universal ("datos IA"): se asigna cuando ningún otro template encaja.
+    # El backend usará extract_freeform() en vez de extract() para estos templates.
+    is_universal: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     fields: Mapped[list["TemplateField"]] = relationship(

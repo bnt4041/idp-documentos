@@ -18,20 +18,27 @@ def _installed(name: str, models: list[str]) -> bool:
 
 @router.get("/status")
 def ai_status():
-    # Generación (puede ser un backend remoto) y embeddings (backend local) se
-    # comprueban por separado: cada modelo contra el backend donde vive.
+    # Generación (puede ser DeepSeek cloud, Ollama remoto, o local) y embeddings
+    # (backend local) se comprueban por separado.
     gen_available = ollama_client.available()
     gen_models = ollama_client.list_models() if gen_available else []
-    model_ok = _installed(settings.ollama_model, gen_models)
+
+    if settings.deepseek_enabled and settings.deepseek_api_key:
+        model_ok = True  # DeepSeek: el modelo se elige en la API, no se "instala"
+    else:
+        model_ok = _installed(settings.ollama_model, gen_models)
 
     embed_available = ollama_client.embed_available()
     embed_models = ollama_client.list_embed_models() if embed_available else []
     embed_ok = _installed(settings.ollama_embed_model, embed_models)
 
+    backend = "deepseek" if (settings.deepseek_enabled and settings.deepseek_api_key) else "ollama"
+
     return {
         "available": gen_available,
         "ready": gen_available and model_ok and embed_available and embed_ok,
-        "model": settings.ollama_model,
+        "backend": backend,
+        "model": settings.deepseek_model if backend == "deepseek" else settings.ollama_model,
         "model_installed": model_ok,
         "embed_model": settings.ollama_embed_model,
         "embed_installed": embed_ok,

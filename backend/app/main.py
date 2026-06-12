@@ -2,10 +2,20 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import Base, engine, SessionLocal
-from .routers import ai, documents, records, templates
+from .routers import ai, config, documents, records, templates
 
 # Crea las tablas si no existen (MVP; en producción usar Alembic)
 Base.metadata.create_all(bind=engine)
+
+# Añade columnas nuevas en BDs existentes (create_all no altera tablas ya creadas)
+with engine.connect() as conn:
+    try:
+        conn.exec_driver_sql(
+            "ALTER TABLE templates ADD COLUMN IF NOT EXISTS is_universal BOOLEAN NOT NULL DEFAULT false"
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
 
 app = FastAPI(
     title="IDP Visual API",
@@ -25,11 +35,12 @@ app.include_router(documents.router)
 app.include_router(templates.router)
 app.include_router(records.router)
 app.include_router(ai.router)
+app.include_router(config.router)
 
 
 @app.on_event("startup")
-def _warmup_ollama():
-    """Pre-calienta Ollama para que la primera sugerencia no tarde 30s."""
+def _startup():
+    """Pre-calienta Ollama y asegura que existe la plantilla universal 'datos IA'."""
     import threading
     def _warm():
         try:
@@ -39,6 +50,31 @@ def _warmup_ollama():
         except Exception:  # noqa: BLE001
             pass
     threading.Thread(target=_warm, daemon=True).start()
+    _ensure_universal_template()
+
+
+def _ensure_universal_template():
+    """Crea la plantilla universal 'datos IA' si no existe. Se usa como fallback
+    cuando ningún otro template encaja con el documento."""
+    from . import models
+
+    db = SessionLocal()
+    try:
+        existing = db.query(models.Template).filter_by(is_universal=True).first()
+        if not existing:
+            tpl = models.Template(
+                name="datos IA",
+                description="Plantilla universal: la IA extrae los datos que considere relevantes en formato libre.",
+                is_universal=True,
+                signature={},
+                border={"x": 0, "y": 0, "w": 1, "h": 1},
+            )
+            db.add(tpl)
+            db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+    finally:
+        db.close()
 
 
 @app.get("/api/health", tags=["health"])
@@ -61,6 +97,8 @@ def reset_all_data():
         db.query(models.Template).delete()
         db.query(models.Document).delete()
         db.commit()
+        # Recrear la plantilla universal tras el reseteo
+        _ensure_universal_template()
         return {
             "status": "ok",
             "message": "Todos los datos han sido eliminados. La aplicación está como nueva.",

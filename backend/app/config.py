@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     ollama_gen_url: str = ""          # ej. "https://bot.dealerbest.com/ollama"
     ollama_gen_api_key: str = ""      # Bearer token del server de generación (si lo pide)
 
+    # -----------------------------------------------------------------------
+    # Backend DeepSeek (API cloud, compatible con OpenAI)
+    # -----------------------------------------------------------------------
+    # Si deepseek_enabled=True, la generación usa la API de DeepSeek en lugar
+    # de Ollama (local o remoto). Los embeddings siguen en Ollama local.
+    deepseek_enabled: bool = False
+    deepseek_api_key: str = ""        # Clave API de DeepSeek (https://platform.deepseek.com)
+    deepseek_model: str = "deepseek-chat"  # deepseek-chat (V3) o deepseek-reasoner (R1)
+    deepseek_base_url: str = "https://api.deepseek.com"
+
     class Config:
         env_file = ".env"
 
